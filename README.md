@@ -146,7 +146,6 @@ admin_dashboard/
 │   │   ├── form/              # Form components
 │   │   ├── header/            # Header components
 │   │   ├── tables/            # Table components
-│   │   ├── ui/                # Base UI components
 │   │   └── ProtectedRoute.tsx # Route protection
 │   ├── 📂 context/            # React context providers
 │   ├── 📂 data/               # Data management & API calls
@@ -304,9 +303,6 @@ If you encounter any issues or have questions:
 3. Create a new issue with detailed information
 4. Join our community discussions
 
-## 📜 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 

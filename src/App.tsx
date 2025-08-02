@@ -8,7 +8,6 @@ import Customers from "./pages/Tables";
 import CustomerDetail from "./pages/CustomerDetail";
 import Profile from "./pages/Profile";
 import Charts from "./pages/Charts";
-import UIElements from "./pages/UIElements";
 import SignIn from "./pages/AuthPages/SignIn";
 import SignUp from "./pages/AuthPages/SignUp";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -18,12 +17,6 @@ import { initializeAuth, authService } from "./services/auth";
 const ArrowUpIcon = ({ className }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-  </svg>
-);
-
-const ArrowDownIcon = ({ className }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
   </svg>
 );
 
@@ -97,7 +90,6 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
     { name: 'Tasks', href: '/tasks', icon: '✅' },
     { name: 'Add Customer', href: '/forms', icon: '📝' },
     { name: 'Customers', href: '/tables', icon: '📋' },
-    { name: 'UI Elements', href: '/ui-elements', icon: '🎨' },
     { name: 'Charts', href: '/charts', icon: '📊' },
     { name: 'Authentication', href: '/auth', icon: '🔐' },
   ];
@@ -503,7 +495,6 @@ export default function App() {
                 <Route path="/tables" element={<Customers />} />
                 <Route path="/customer/:id" element={<CustomerDetail />} />
                 <Route path="/pages" element={<GenericPage title="Pages" description="Various page templates and layouts." />} />
-                <Route path="/ui-elements" element={<UIElements />} />
                 <Route path="/charts" element={<Charts />} />
                 <Route path="/auth" element={<GenericPage title="Authentication" description="Login, registration, and user authentication." />} />
                 <Route path="/settings" element={<GenericPage title="Settings" description="User settings and preferences." />} />
