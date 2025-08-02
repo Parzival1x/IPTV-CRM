@@ -1,0 +1,241 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom base styles */
+@layer base {
+  body {
+    @apply relative font-normal bg-gray-50 dark:bg-gray-900;
+    font-family: 'Outfit', sans-serif;
+  }
+  
+  html {
+    @apply scroll-smooth;
+  }
+}
+
+/* Custom components */
+@layer components {
+  .menu-item {
+    @apply flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800;
+  }
+  
+  .menu-item-active {
+    @apply bg-brand-50 text-brand-600 dark:bg-brand-950 dark:text-brand-400;
+  }
+  
+  .menu-item-inactive {
+    @apply text-gray-700 dark:text-gray-400;
+  }
+  
+  .menu-item-icon {
+    @apply h-5 w-5 flex-shrink-0;
+  }
+  
+  .menu-item-icon-active {
+    @apply text-brand-600 dark:text-brand-400;
+  }
+  
+  .menu-item-icon-inactive {
+    @apply text-gray-400 dark:text-gray-500;
+  }
+  
+  .menu-item-arrow {
+    @apply ml-auto h-5 w-5 flex-shrink-0;
+  }
+  
+  .menu-item-arrow-active {
+    @apply text-brand-600 dark:text-brand-400;
+  }
+  
+  .menu-item-arrow-inactive {
+    @apply text-gray-400 dark:text-gray-500;
+  }
+  
+  .menu-dropdown-item {
+    @apply block rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800;
+  }
+  
+  .menu-dropdown-item-active {
+    @apply bg-brand-50 text-brand-600 dark:bg-brand-950 dark:text-brand-400;
+  }
+  
+  .menu-dropdown-item-inactive {
+    @apply text-gray-700 dark:text-gray-400;
+  }
+  
+  .menu-dropdown-badge {
+    @apply ml-auto rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-400;
+  }
+}
+
+/* ApexCharts custom styles */
+.apexcharts-legend-text {
+  color: rgb(107 114 128) !important;
+}
+
+.dark .apexcharts-legend-text {
+  color: rgb(156 163 175) !important;
+}
+
+.apexcharts-text {
+  fill: rgb(107 114 128) !important;
+}
+
+.dark .apexcharts-text {
+  fill: rgb(156 163 175) !important;
+}
+
+.apexcharts-tooltip.apexcharts-theme-light {
+  background: white !important;
+  border: 1px solid rgb(229 231 235) !important;
+}
+
+.dark .apexcharts-tooltip.apexcharts-theme-light {
+  background: rgb(31 41 55) !important;
+  border: 1px solid rgb(75 85 99) !important;
+}
+
+.apexcharts-tooltip-marker {
+  width: 8px !important;
+  height: 8px !important;
+}
+
+.apexcharts-tooltip-series-group {
+  padding: 8px !important;
+}
+
+.apexcharts-tooltip-y-group {
+  padding: 4px !important;
+}
+
+.apexcharts-tooltip-title {
+  color: rgb(17 24 39) !important;
+}
+
+.dark .apexcharts-tooltip-title {
+  color: rgb(243 244 246) !important;
+}
+
+.apexcharts-tooltip-text {
+  color: rgb(107 114 128) !important;
+}
+
+.dark .apexcharts-tooltip-text {
+  color: rgb(156 163 175) !important;
+}
+
+.apexcharts-tooltip-text-y-value {
+  font-weight: 500 !important;
+  color: rgb(17 24 39) !important;
+}
+
+.dark .apexcharts-tooltip-text-y-value {
+  color: rgb(243 244 246) !important;
+}
+
+.apexcharts-gridline {
+  stroke: rgb(229 231 235) !important;
+}
+
+.dark .apexcharts-gridline {
+  stroke: rgb(75 85 99) !important;
+}
+
+#chartTwo .apexcharts-datalabels-group {
+  opacity: 0 !important;
+}
+
+#chartTwo .apexcharts-datalabels-group .apexcharts-text {
+  fill: white !important;
+}
+
+#chartDarkStyle .apexcharts-datalabels-group .apexcharts-text {
+  fill: rgb(17 24 39) !important;
+}
+
+/* Additional utility classes */
+@layer utilities {
+  .text-title-2xl {
+    font-size: 72px;
+    line-height: 90px;
+  }
+  
+  .text-title-xl {
+    font-size: 60px;
+    line-height: 72px;
+  }
+  
+  .text-title-lg {
+    font-size: 48px;
+    line-height: 60px;
+  }
+  
+  .text-title-md {
+    font-size: 36px;
+    line-height: 44px;
+  }
+  
+  .text-title-sm {
+    font-size: 30px;
+    line-height: 38px;
+  }
+  
+  .text-theme-xl {
+    font-size: 20px;
+    line-height: 30px;
+  }
+  
+  .text-theme-sm {
+    font-size: 14px;
+    line-height: 20px;
+  }
+  
+  .text-theme-xs {
+    font-size: 12px;
+    line-height: 18px;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgb(243 244 246);
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: rgb(31 41 55);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(209 213 219);
+  border-radius: 9999px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgb(75 85 99);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(156 163 175);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgb(107 114 128);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(156 163 175) rgb(243 244 246);
+}
+
+.dark * {
+  scrollbar-color: rgb(75 85 99) rgb(31 41 55);
+}
