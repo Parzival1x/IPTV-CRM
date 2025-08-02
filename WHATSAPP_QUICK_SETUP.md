@@ -10,9 +10,9 @@ You have two choices for WhatsApp integration:
 
 #### Option A: Use Twilio WhatsApp (Recommended - Easier)
 ✅ **Already configured in your .env file!**
-- Account SID: `AC9b0315dcf8280ac5c7e5630e3549b619`
-- Auth Token: `b72f26708568eaa8522e874ce0b95a59`
-- WhatsApp Number: `whatsapp:+14785513710`
+- Account SID: ``
+- Auth Token: ``
+- WhatsApp Number: ``
 
 #### Option B: Use Facebook WhatsApp Business API
 ❌ **Currently not configured - needs setup**
