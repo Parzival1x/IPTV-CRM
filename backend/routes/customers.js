@@ -1,15 +1,109 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const Customer = require('../models/Customer');
+const { protect, developmentOnly } = require('../middleware/auth');
+const customerRepository = require('../repositories/customerRepository');
 
 const router = express.Router();
 
-// @route   GET /api/customers
-// @desc    Get all customers
-// @access  Private
+const isInternationalPhoneNumber = (value) =>
+  /^\+[1-9]\d{7,14}$/.test(String(value || '').trim());
+
+const normalizePaymentMode = (paymentMode) => {
+  if (!paymentMode) {
+    return 'Other';
+  }
+
+  const normalized = String(paymentMode).trim().toLowerCase();
+
+  const paymentModeMap = {
+    cash: 'Cash',
+    card: 'Credit Card',
+    'credit card': 'Credit Card',
+    credit_card: 'Credit Card',
+    'debit card': 'Debit Card',
+    debit_card: 'Debit Card',
+    paypal: 'PayPal',
+    'bank transfer': 'Bank Transfer',
+    bank_transfer: 'Bank Transfer',
+    other: 'Other'
+  };
+
+  return paymentModeMap[normalized] || paymentMode;
+};
+
+const normalizeCustomerPayload = (payload) => {
+  const normalized = { ...payload };
+
+  if (normalized.status) {
+    normalized.status = String(normalized.status).trim().toLowerCase();
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'paymentMode')) {
+    normalized.paymentMode = normalizePaymentMode(normalized.paymentMode);
+  }
+
+  return normalized;
+};
+
+const normalizeServicePayload = (payload) => {
+  const normalized = { ...payload };
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'paymentMode')) {
+    normalized.paymentMode = normalizePaymentMode(normalized.paymentMode);
+  }
+
+  if (normalized.status) {
+    normalized.status = String(normalized.status).trim().toLowerCase();
+  }
+
+  if (Array.isArray(normalized.features)) {
+    normalized.features = normalized.features
+      .map((feature) => String(feature || '').trim())
+      .filter(Boolean);
+  }
+
+  return normalized;
+};
+
+const handleValidationErrors = (req, res) => {
+  const errors = validationResult(req);
+
+  if (!errors.isEmpty()) {
+    res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: errors.array()
+    });
+    return true;
+  }
+
+  return false;
+};
+
+router.post('/seed', developmentOnly, async (req, res) => {
+  try {
+    const customers = await customerRepository.ensureSampleCustomers();
+
+    res.json({
+      success: true,
+      message: 'Sample customers ready',
+      count: customers.length,
+      customers
+    });
+  } catch (error) {
+    console.error('Seed customers error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error seeding customers'
+    });
+  }
+});
+
+router.use(protect);
+
 router.get('/', async (req, res) => {
   try {
-    const customers = await Customer.find().sort({ createdAt: -1 });
+    const customers = await customerRepository.getAll();
     res.json({
       success: true,
       customers
@@ -23,13 +117,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-// @route   GET /api/customers/:id
-// @desc    Get customer by ID
-// @access  Private
 router.get('/:id', async (req, res) => {
   try {
-    const customer = await Customer.findById(req.params.id);
-    
+    const customer = await customerRepository.getById(req.params.id);
+
     if (!customer) {
       return res.status(404).json({
         success: false,
@@ -50,138 +141,130 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// @route   POST /api/customers
-// @desc    Create new customer
-// @access  Private
 router.post('/', [
   body('name').isLength({ min: 2 }).trim(),
   body('email').isEmail().normalizeEmail(),
-  body('phone').isLength({ min: 10 }).trim()
+  body('phone')
+    .trim()
+    .custom((value) => {
+      if (!isInternationalPhoneNumber(value)) {
+        throw new Error('Phone number must use international format, for example +919876543210');
+      }
+
+      return true;
+    }),
+  body('whatsappNumber')
+    .optional({ values: 'falsy' })
+    .trim()
+    .custom((value) => {
+      if (!isInternationalPhoneNumber(value)) {
+        throw new Error('WhatsApp number must use international format, for example +919876543210');
+      }
+
+      return true;
+    })
 ], async (req, res) => {
   try {
-    console.log('📝 Creating new customer...');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
-    
-    // Check for validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      console.log('❌ Validation errors:', errors.array());
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
+    if (handleValidationErrors(req, res)) {
+      return;
     }
 
-    console.log('✅ Validation passed');
+    const existingCustomer = await customerRepository.findByEmail(req.body.email);
+    const existingPhone = await customerRepository.findByPhone(req.body.phone);
 
-    // Check if customer already exists
-    console.log('🔍 Checking for existing customer with email:', req.body.email);
-    const existingCustomer = await Customer.findOne({ email: req.body.email });
     if (existingCustomer) {
-      console.log('❌ Customer already exists with email:', req.body.email);
       return res.status(400).json({
         success: false,
         message: 'Customer with this email already exists'
       });
     }
 
-    console.log('✅ Email is unique');
+    if (existingPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer with this phone number already exists'
+      });
+    }
 
-    // Create customer object with all fields
-    const customerData = {
-      name: req.body.name,
-      email: req.body.email,
-      phone: req.body.phone,
-      address: req.body.address || '',
-      status: req.body.status || 'pending',
-      avatar: req.body.avatar || '👤',
-      role: req.body.role || 'Customer',
-      mac: req.body.mac || '',
-      box: req.body.box || '',
-      startDate: req.body.startDate || '',
-      paymentDate: req.body.paymentDate || '',
-      paymentMode: req.body.paymentMode || 'Other',
-      amount: req.body.amount || '0.00',
-      expiryDate: req.body.expiryDate || '',
-      totalCredit: req.body.totalCredit || '0.00',
-      alreadyGiven: req.body.alreadyGiven || '0.00',
-      remainingCredits: req.body.remainingCredits || '0.00',
-      note: req.body.note || '',
-      serviceDuration: req.body.serviceDuration || ''
-    };
-
-    console.log('📦 Customer data to save:', JSON.stringify(customerData, null, 2));
-
-    const customer = new Customer(customerData);
-    
-    console.log('💾 Saving customer to database...');
-    await customer.save();
-    
-    console.log('✅ Customer saved successfully with ID:', customer._id);
+    const customer = await customerRepository.create(
+      normalizeCustomerPayload(req.body)
+    );
 
     res.status(201).json({
       success: true,
       customer
     });
   } catch (error) {
-    console.error('❌ Create customer error details:');
-    console.error('Error message:', error.message);
-    console.error('Error name:', error.name);
-    console.error('Error stack:', error.stack);
-    
-    // Check for specific MongoDB errors
-    if (error.name === 'ValidationError') {
-      console.error('🔍 Validation error details:', error.errors);
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: Object.values(error.errors).map(err => ({
-          field: err.path,
-          message: err.message
-        }))
-      });
-    }
-    
-    if (error.code === 11000) {
-      console.error('🔍 Duplicate key error:', error.keyValue);
+    console.error('Create customer error:', error);
+
+    if (error.code === '23505') {
       return res.status(400).json({
         success: false,
         message: 'Customer with this email already exists'
       });
     }
-    
+
     res.status(500).json({
       success: false,
-      message: 'Server error creating customer',
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+      message: 'Server error creating customer'
     });
   }
 });
 
-// @route   PUT /api/customers/:id
-// @desc    Update customer
-// @access  Private
 router.put('/:id', [
   body('name').optional().isLength({ min: 2 }).trim(),
   body('email').optional().isEmail().normalizeEmail(),
-  body('phone').optional().isLength({ min: 10 }).trim()
+  body('phone')
+    .optional()
+    .trim()
+    .custom((value) => {
+      if (!isInternationalPhoneNumber(value)) {
+        throw new Error('Phone number must use international format, for example +919876543210');
+      }
+
+      return true;
+    }),
+  body('whatsappNumber')
+    .optional({ values: 'falsy' })
+    .trim()
+    .custom((value) => {
+      if (!isInternationalPhoneNumber(value)) {
+        throw new Error('WhatsApp number must use international format, for example +919876543210');
+      }
+
+      return true;
+    })
 ], async (req, res) => {
   try {
-    // Check for validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
+    if (handleValidationErrors(req, res)) {
+      return;
     }
 
-    const customer = await Customer.findByIdAndUpdate(
+    if (req.body.email) {
+      const existingCustomer = await customerRepository.findByEmail(req.body.email);
+
+      if (existingCustomer && existingCustomer.id !== req.params.id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Customer with this email already exists'
+        });
+      }
+    }
+
+    if (req.body.phone) {
+      const existingPhone = await customerRepository.findByPhone(req.body.phone);
+
+      if (existingPhone && existingPhone.id !== req.params.id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Customer with this phone number already exists'
+        });
+      }
+    }
+
+    const customer = await customerRepository.update(
       req.params.id,
-      req.body,
-      { new: true, runValidators: true }
+      normalizeCustomerPayload(req.body)
     );
 
     if (!customer) {
@@ -197,6 +280,14 @@ router.put('/:id', [
     });
   } catch (error) {
     console.error('Update customer error:', error);
+
+    if (error.code === '23505') {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer with this email already exists'
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: 'Server error updating customer'
@@ -204,14 +295,191 @@ router.put('/:id', [
   }
 });
 
-// @route   DELETE /api/customers/:id
-// @desc    Delete customer
-// @access  Private
+router.post('/:id/reset-portal-password', async (req, res) => {
+  try {
+    const result = await customerRepository.resetPortalPassword(req.params.id);
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      customer: result.customer,
+      portalSetup: {
+        temporaryPassword: result.temporaryPassword,
+        resetRequired: true
+      }
+    });
+  } catch (error) {
+    console.error('Reset portal password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error resetting portal password'
+    });
+  }
+});
+
+router.post(
+  '/:id/services',
+  [
+    body('planCode').isLength({ min: 2 }).trim(),
+    body('name').isLength({ min: 2 }).trim(),
+    body('status').optional().isIn(['draft', 'active', 'expired', 'cancelled', 'suspended']),
+    body('amount').optional(),
+    body('paymentMode').optional().trim(),
+    body('durationMonths').optional().isInt({ min: 1, max: 36 }),
+    body('startDate').optional().isISO8601(),
+    body('expiryDate').optional().isISO8601(),
+    body('maxConnections').optional().isInt({ min: 1, max: 20 }),
+    body('features').optional().isArray(),
+    body('portalUrl').optional({ values: 'falsy' }).isURL(),
+    body('billingUrl').optional({ values: 'falsy' }).isURL()
+  ],
+  async (req, res) => {
+    try {
+      if (handleValidationErrors(req, res)) {
+        return;
+      }
+
+      const existingCustomer = await customerRepository.getById(req.params.id);
+
+      if (!existingCustomer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Customer not found'
+        });
+      }
+
+      const customer = await customerRepository.addServiceSubscription(
+        req.params.id,
+        normalizeServicePayload(req.body)
+      );
+
+      res.status(201).json({
+        success: true,
+        customer
+      });
+    } catch (error) {
+      console.error('Add customer service error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error adding customer service'
+      });
+    }
+  }
+);
+
+router.post(
+  '/:id/payments',
+  [
+    body('subscriptionIds').isArray({ min: 1 }),
+    body('subscriptionIds.*').isUUID(),
+    body('amount').optional().isFloat({ min: 0.01 }),
+    body('paymentMode').optional().trim(),
+    body('paymentDate').optional().isISO8601()
+  ],
+  async (req, res) => {
+    try {
+      if (handleValidationErrors(req, res)) {
+        return;
+      }
+
+      const existingCustomer = await customerRepository.getById(req.params.id);
+
+      if (!existingCustomer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Customer not found'
+        });
+      }
+
+      const customer = await customerRepository.recordCustomerPayment(req.params.id, req.body);
+
+      res.status(201).json({
+        success: true,
+        customer
+      });
+    } catch (error) {
+      console.error('Record customer payment error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error recording payment'
+      });
+    }
+  }
+);
+
+router.put(
+  '/:id/services/:serviceId',
+  [
+    body('planCode').isLength({ min: 2 }).trim(),
+    body('name').isLength({ min: 2 }).trim(),
+    body('status').optional().isIn(['draft', 'active', 'expired', 'cancelled', 'suspended']),
+    body('amount').optional(),
+    body('paymentMode').optional().trim(),
+    body('durationMonths').optional().isInt({ min: 1, max: 36 }),
+    body('startDate').optional().isISO8601(),
+    body('expiryDate').optional().isISO8601(),
+    body('maxConnections').optional().isInt({ min: 1, max: 20 }),
+    body('features').optional().isArray(),
+    body('portalUrl').optional({ values: 'falsy' }).isURL(),
+    body('billingUrl').optional({ values: 'falsy' }).isURL()
+  ],
+  async (req, res) => {
+    try {
+      if (handleValidationErrors(req, res)) {
+        return;
+      }
+
+      const existingCustomer = await customerRepository.getById(req.params.id);
+
+      if (!existingCustomer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Customer not found'
+        });
+      }
+
+      const existingService = existingCustomer.subscriptions.find(
+        (subscription) => subscription.id === req.params.serviceId
+      );
+
+      if (!existingService) {
+        return res.status(404).json({
+          success: false,
+          message: 'Service not found for this customer'
+        });
+      }
+
+      const customer = await customerRepository.updateServiceSubscription(
+        req.params.id,
+        req.params.serviceId,
+        normalizeServicePayload(req.body)
+      );
+
+      res.json({
+        success: true,
+        customer
+      });
+    } catch (error) {
+      console.error('Update customer service error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error updating customer service'
+      });
+    }
+  }
+);
+
 router.delete('/:id', async (req, res) => {
   try {
-    const customer = await Customer.findByIdAndDelete(req.params.id);
+    const wasDeleted = await customerRepository.remove(req.params.id);
 
-    if (!customer) {
+    if (!wasDeleted) {
       return res.status(404).json({
         success: false,
         message: 'Customer not found'
@@ -227,105 +495,6 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error deleting customer'
-    });
-  }
-});
-
-// @route   POST /api/customers/seed
-// @desc    Seed sample customers
-// @access  Public (for development only)
-router.post('/seed', async (req, res) => {
-  try {
-    // Check if customers already exist
-    const existingCustomers = await Customer.find();
-    if (existingCustomers.length > 0) {
-      return res.json({
-        success: true,
-        message: 'Customers already exist',
-        count: existingCustomers.length
-      });
-    }
-
-    // Sample customers
-    const sampleCustomers = [
-      {
-        name: 'John Doe',
-        email: 'john@example.com',
-        phone: '+1234567890',
-        address: '123 Main St, New York, NY',
-        status: 'active',
-        avatar: '/images/user/user-02.png',
-        role: 'customer',
-        mac: 'AA:BB:CC:DD:EE:FF',
-        box: 'BOX001',
-        startDate: '2024-01-15',
-        paymentDate: '2024-01-15',
-        paymentMode: 'Credit Card',
-        amount: '99.99',
-        expiryDate: '2024-12-15',
-        totalCredit: '500.00',
-        alreadyGiven: '100.00',
-        remainingCredits: '400.00',
-        note: 'VIP Customer',
-        lastLogin: '2024-01-10'
-      },
-      {
-        name: 'Jane Smith',
-        email: 'jane@example.com',
-        phone: '+1234567891',
-        address: '456 Oak Ave, Los Angeles, CA',
-        status: 'inactive',
-        avatar: '/images/user/user-03.png',
-        role: 'customer',
-        mac: 'BB:CC:DD:EE:FF:AA',
-        box: 'BOX002',
-        startDate: '2024-02-01',
-        paymentDate: '2024-02-01',
-        paymentMode: 'PayPal',
-        amount: '79.99',
-        expiryDate: '2024-11-01',
-        totalCredit: '300.00',
-        alreadyGiven: '50.00',
-        remainingCredits: '250.00',
-        note: 'Regular Customer',
-        lastLogin: '2024-01-05'
-      },
-      {
-        name: 'Bob Johnson',
-        email: 'bob@example.com',
-        phone: '+1234567892',
-        address: '789 Pine St, Chicago, IL',
-        status: 'active',
-        avatar: '/images/user/user-04.png',
-        role: 'customer',
-        mac: 'CC:DD:EE:FF:AA:BB',
-        box: 'BOX003',
-        startDate: '2024-03-01',
-        paymentDate: '2024-03-01',
-        paymentMode: 'Bank Transfer',
-        amount: '129.99',
-        expiryDate: '2025-02-01',
-        totalCredit: '800.00',
-        alreadyGiven: '200.00',
-        remainingCredits: '600.00',
-        note: 'Premium Customer',
-        lastLogin: '2024-01-12'
-      }
-    ];
-
-    const customers = await Customer.insertMany(sampleCustomers);
-
-    res.json({
-      success: true,
-      message: 'Sample customers created successfully',
-      count: customers.length,
-      customers
-    });
-  } catch (error) {
-    console.error('Seed customers error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error seeding customers'
     });
   }
 });

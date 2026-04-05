@@ -1,77 +1,85 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-require('dotenv').config({ path: '../.env' });
+const { getSupabaseServiceClient } = require('./config/supabase');
+const { isDevelopment, frontendOriginAliases } = require('./config/runtime');
+const adminRepository = require('./repositories/adminRepository');
+const customerRepository = require('./repositories/customerRepository');
+const { getNotificationStatus } = require('./services/notificationService');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Security middleware
 app.use(helmet());
 
-// Rate limiting
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || frontendOriginAliases.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    credentials: true
+  })
+);
+
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: isDevelopment ? 1000 : 100,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: 'Too many requests from this IP, please try again later.'
 });
 app.use('/api/', limiter);
 
-// CORS configuration
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:3000'],
-  credentials: true
-}));
-
-// Body parser middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// MongoDB connection
-const connectDB = async () => {
-  try {
-    const mongoURI = process.env.MONGODB_URI;
-    if (!mongoURI) {
-      throw new Error('MONGODB_URI is not defined in environment variables');
-    }
-
-    console.log('🔄 Connecting to MongoDB Atlas...');
-    
-    await mongoose.connect(mongoURI);
-
-    console.log('✅ MongoDB connected successfully');
-    console.log(`📊 Database: ${mongoose.connection.name}`);
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
-    console.log('🔧 Troubleshooting tips:');
-    console.log('1. Check your MongoDB Atlas password');
-    console.log('2. Ensure your IP is whitelisted in MongoDB Atlas');
-    console.log('3. Verify the connection string format');
-    process.exit(1);
-  }
-};
-
-// Connect to database
-connectDB();
-
-// Routes
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/customer-auth', require('./routes/customerAuth'));
+app.use('/api/portal', require('./routes/portal'));
 app.use('/api/customers', require('./routes/customers'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/service-requests', require('./routes/serviceRequests'));
+app.use('/api/admin-notifications', require('./routes/adminNotifications'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/plans', require('./routes/plans'));
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
-  });
+app.get('/api/health', async (req, res) => {
+  try {
+    const supabase = getSupabaseServiceClient();
+    const { error } = await supabase
+      .from('admin_users')
+      .select('id')
+      .limit(1);
+
+    if (error) {
+      throw error;
+    }
+
+    res.json({
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'Connected',
+      provider: 'Supabase'
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'Disconnected',
+      provider: 'Supabase',
+      message: error.message
+    });
+  }
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
@@ -81,7 +89,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -89,11 +96,55 @@ app.use('*', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 API available at: http://localhost:${PORT}/api`);
-  console.log(`🔍 Health check: http://localhost:${PORT}/api/health`);
+const bootstrapApplication = async () => {
+  if (isDevelopment && process.env.SEED_DEFAULT_ADMIN !== 'false') {
+    await adminRepository.seedInitialAdmin({
+      name: process.env.DEV_ADMIN_NAME || 'Admin User',
+      email: process.env.DEV_ADMIN_EMAIL || 'admin@example.com',
+      password: process.env.DEV_ADMIN_PASSWORD || 'admin123',
+      role: process.env.DEV_ADMIN_ROLE || 'admin'
+    });
+  }
+
+  if (isDevelopment && process.env.SEED_SAMPLE_CUSTOMERS !== 'false') {
+    await customerRepository.ensureSampleCustomers();
+  }
+};
+
+const startServer = async () => {
+  await bootstrapApplication();
+
+  const server = app.listen(PORT, () => {
+    const notificationStatus = getNotificationStatus();
+
+    console.log(`Server running on port ${PORT}`);
+    console.log(`API available at: http://localhost:${PORT}/api`);
+    console.log(`Health check: http://localhost:${PORT}/api/health`);
+    console.log('Data provider: Supabase');
+    console.log(`Email delivery: ${notificationStatus.emailConfigured ? 'Configured' : 'Not configured'}`);
+    console.log(`WhatsApp delivery: ${notificationStatus.whatsappConfigured ? 'Configured' : 'Not configured'}`);
+  });
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use. Stop the existing backend process or run close-ports.bat before starting a new one.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.error('Failed to bind server:', error.message);
+    process.exitCode = 1;
+  });
+};
+
+startServer().catch((error) => {
+  console.error('Failed to start server:', error.message);
+
+  if (error.code === 'PGRST205') {
+    console.error('Supabase schema is missing. Run backend/supabase/schema.sql in the Supabase SQL editor or fix DATABASE_URL and run `npm run db:push` from backend.');
+  }
+
+  process.exitCode = 1;
 });
 
 module.exports = app;

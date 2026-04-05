@@ -12,20 +12,30 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 
   useEffect(() => {
     const checkAuth = () => {
-      setIsAuthenticated(authService.isAuthenticated());
+      authService
+        .validateSession()
+        .then(setIsAuthenticated)
+        .catch(() => setIsAuthenticated(false));
     };
 
     checkAuth();
     
-    // Listen for storage changes (in case user logs out in another tab)
     const handleStorageChange = () => {
       checkAuth();
     };
 
+    const handleUnauthorized = () => {
+      setIsAuthenticated(false);
+    };
+
     window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('auth:changed', handleStorageChange);
+    window.addEventListener('auth:unauthorized', handleUnauthorized);
     
     return () => {
       window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('auth:changed', handleStorageChange);
+      window.removeEventListener('auth:unauthorized', handleUnauthorized);
     };
   }, []);
 
@@ -35,7 +45,7 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
       <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600 dark:text-gray-400">Loading...</p>
+          <p className="mt-4 text-gray-600 dark:text-gray-400">Checking session...</p>
         </div>
       </div>
     );

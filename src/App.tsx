@@ -1,508 +1,463 @@
-import { BrowserRouter as Router, Routes, Route, Link, useLocation } from "react-router-dom";
-import { useState, useEffect, useRef } from "react";
-import ECommerce from "./pages/ECommerce";
-import Analytics from "./pages/Analytics";
-import Calendar from "./pages/Calendar";
-import AddCustomer from "./pages/Forms";
-import Customers from "./pages/Tables";
-import CustomerDetail from "./pages/CustomerDetail";
-import Profile from "./pages/Profile";
-import Charts from "./pages/Charts";
-import SignIn from "./pages/AuthPages/SignIn";
-import SignUp from "./pages/AuthPages/SignUp";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
 import ProtectedRoute from "./components/ProtectedRoute";
-import { initializeAuth, authService } from "./services/auth";
+import CustomerProtectedRoute from "./components/CustomerProtectedRoute";
+import SignIn from "./pages/AuthPages/SignIn";
+import CustomerPortalDashboard from "./pages/CustomerPortalDashboard";
+import CustomerDetail from "./pages/CustomerDetail";
+import Dashboard from "./pages/Dashboard";
+import EditCustomer from "./pages/EditCustomer";
+import AddCustomer from "./pages/Forms";
+import HomePage from "./pages/HomePage";
+import PaymentStatusReview from "./pages/PaymentStatusReview";
+import PortalSignIn from "./pages/PortalSignIn";
+import PortalAccessAdmin from "./pages/PortalAccessAdmin";
+import Profile from "./pages/Profile";
+import ServiceRequestsReview from "./pages/ServiceRequestsReview";
+import Customers from "./pages/Tables";
+import { authService, type AdminUser } from "./services/auth";
 
-// Simple Arrow Icons
-const ArrowUpIcon = ({ className }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-  </svg>
-);
+type NavigationItem = {
+  label: string;
+  to: string;
+  description: string;
+  shortLabel: string;
+};
 
-// Helper functions for avatar initials
+const navigationItems: NavigationItem[] = [
+  {
+    label: "Dashboard",
+    to: "/dashboard",
+    description: "Track subscribers, revenue, and renewals.",
+    shortLabel: "DB",
+  },
+  {
+    label: "Customers",
+    to: "/customers",
+    description: "Browse and manage subscriber accounts.",
+    shortLabel: "CU",
+  },
+  {
+    label: "Renewals",
+    to: "/renewals",
+    description: "Review payment status, due dates, and expiry risk.",
+    shortLabel: "RN",
+  },
+  {
+    label: "Requests",
+    to: "/service-requests",
+    description: "Approve customer service requests and track admin alerts.",
+    shortLabel: "RQ",
+  },
+  {
+    label: "Portal Access",
+    to: "/portal-access",
+    description: "Reset customer portal passwords and export temporary credentials.",
+    shortLabel: "PA",
+  },
+  {
+    label: "Add Customer",
+    to: "/customers/new",
+    description: "Create new IPTV customer records.",
+    shortLabel: "AC",
+  },
+  {
+    label: "Account",
+    to: "/profile",
+    description: "Update your admin profile and security.",
+    shortLabel: "ME",
+  },
+];
+
 const getInitials = (name: string) => {
-  const names = name.trim().split(' ');
-  if (names.length === 1) {
-    return names[0].charAt(0).toUpperCase();
+  const parts = name.trim().split(" ").filter(Boolean);
+
+  if (parts.length === 0) {
+    return "A";
   }
-  return (names[0].charAt(0) + names[names.length - 1].charAt(0)).toUpperCase();
+
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 };
 
-const getAvatarColor = (name: string) => {
-  const colors = [
-    'bg-blue-500 text-white',
-    'bg-green-500 text-white',
-    'bg-purple-500 text-white',
-    'bg-pink-500 text-white',
-    'bg-indigo-500 text-white',
-    'bg-yellow-500 text-white',
-    'bg-red-500 text-white',
-    'bg-teal-500 text-white',
+const getAvatarTone = (seed: string) => {
+  const tones = [
+    "bg-sky-100 text-sky-700",
+    "bg-emerald-100 text-emerald-700",
+    "bg-amber-100 text-amber-700",
+    "bg-rose-100 text-rose-700",
+    "bg-indigo-100 text-indigo-700",
   ];
-  const index = name.charCodeAt(0) % colors.length;
-  return colors[index];
+
+  return tones[seed.charCodeAt(0) % tones.length];
 };
 
-// Layout Component
-const Layout = ({ children }: { children: React.ReactNode }) => {
+const getPageTitle = (pathname: string) => {
+  if (pathname === "/dashboard") {
+    return "Operations Dashboard";
+  }
+
+  if (pathname === "/customers") {
+    return "Customer Directory";
+  }
+
+  if (pathname === "/customers/new") {
+    return "New Customer";
+  }
+
+  if (pathname === "/renewals") {
+    return "Renewals And Payments";
+  }
+
+  if (pathname === "/service-requests") {
+    return "Service Requests";
+  }
+
+  if (pathname === "/portal-access") {
+    return "Portal Access";
+  }
+
+  if (pathname.startsWith("/customers/") && pathname.endsWith("/edit")) {
+    return "Edit Customer";
+  }
+
+  if (pathname.startsWith("/customers/")) {
+    return "Customer Profile";
+  }
+
+  if (pathname === "/profile") {
+    return "Admin Account";
+  }
+
+  return "IPTV CRM";
+};
+
+const SIDEBAR_STORAGE_KEY = "streamops_sidebar_collapsed";
+
+const AppShell = () => {
   const location = useLocation();
-  const [user, setUser] = useState<any>(null);
-  const [showProfileDropdown, setShowProfileDropdown] = useState(false);
+  const navigate = useNavigate();
   const dropdownRef = useRef<HTMLDivElement>(null);
-  
-  useEffect(() => {
-    // Check if user is logged in
-    const userData = authService.getCurrentUser();
-    if (userData) {
-      setUser(userData);
+  const [currentUser, setCurrentUser] = useState<AdminUser | null>(
+    authService.getCurrentUser()
+  );
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") {
+      return false;
     }
-  }, []);
+
+    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true";
+  });
 
   useEffect(() => {
-    // Close dropdown when clicking outside
+    const syncCurrentUser = () => {
+      setCurrentUser(authService.getCurrentUser());
+    };
+
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setShowProfileDropdown(false);
+        setIsDropdownOpen(false);
       }
     };
 
-    document.addEventListener('mousedown', handleClickOutside);
+    syncCurrentUser();
+    window.addEventListener("storage", syncCurrentUser);
+    window.addEventListener("auth:changed", syncCurrentUser);
+    document.addEventListener("mousedown", handleClickOutside);
+
     return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener("storage", syncCurrentUser);
+      window.removeEventListener("auth:changed", syncCurrentUser);
+      document.removeEventListener("mousedown", handleClickOutside);
     };
   }, []);
 
+  useEffect(() => {
+    setIsDropdownOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(
+        SIDEBAR_STORAGE_KEY,
+        isSidebarCollapsed ? "true" : "false"
+      );
+    }
+  }, [isSidebarCollapsed]);
+
+  const activeItem = useMemo(
+    () =>
+      navigationItems.find((item) =>
+        location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
+      ),
+    [location.pathname]
+  );
+
   const handleSignOut = () => {
     authService.signOut();
-    setUser(null);
-    setShowProfileDropdown(false);
-    // Force a hard redirect to sign in page
-    window.location.href = '/signin';
+    navigate("/", { replace: true });
   };
-  
-  const navigation = [
-    { name: 'Dashboard', href: '/', icon: '📊' },
-    { name: 'eCommerce', href: '/ecommerce', icon: '🛒' },
-    { name: 'Analytics', href: '/analytics', icon: '📈' },
-    { name: 'Calendar', href: '/calendar', icon: '📅' },
-    { name: 'Profile', href: '/profile', icon: '👤' },
-    { name: 'Tasks', href: '/tasks', icon: '✅' },
-    { name: 'Add Customer', href: '/forms', icon: '📝' },
-    { name: 'Customers', href: '/tables', icon: '📋' },
-    { name: 'Charts', href: '/charts', icon: '📊' },
-    { name: 'Authentication', href: '/auth', icon: '🔐' },
-  ];
 
   return (
-    <div className="flex min-h-screen bg-gray-100 dark:bg-gray-900">
-      {/* Sidebar */}
-      <div className="w-64 bg-white dark:bg-gray-800 shadow-lg">
-        <div className="p-6">
-          <Link to="/" className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-sm">T</span>
-            </div>
-            <span className="text-xl font-bold text-gray-800 dark:text-white">TailAdmin</span>
-          </Link>
-        </div>
-        
-        <nav className="mt-8">
-          <div className="px-6 py-3">
-            <span className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Menu</span>
-          </div>
-          <div className="space-y-1">
-            {navigation.map((item) => (
-              <Link
-                key={item.name}
-                to={item.href}
-                className={`flex items-center px-6 py-3 text-sm font-medium ${
-                  location.pathname === item.href
-                    ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/20 border-r-2 border-blue-600'
-                    : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700'
-                }`}
-              >
-                <span className="mr-3">{item.icon}</span>
-                {item.name}
-              </Link>
-            ))}
-          </div>
-        </nav>
-      </div>
-
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col">
-        {/* Header */}
-        <header className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
-          <div className="px-6 py-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h1 className="text-2xl font-semibold text-gray-800 dark:text-white">
-                  {navigation.find(item => item.href === location.pathname)?.name || 'Dashboard'}
-                </h1>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
-                  {user ? `Welcome back, ${user.name}!` : 'Welcome back!'}
-                </p>
-              </div>
-              <div className="flex items-center space-x-4">
-                {user ? (
-                  <div className="relative" ref={dropdownRef}>
-                    <button
-                      onClick={() => setShowProfileDropdown(!showProfileDropdown)}
-                      className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center ${getAvatarColor(user.name)}`}>
-                        {user.avatar ? (
-                          <img src={user.avatar} alt="Avatar" className="w-full h-full rounded-full object-cover" />
-                        ) : (
-                          <span className="text-white font-bold text-sm">{getInitials(user.name)}</span>
-                        )}
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      <div className="flex min-h-screen flex-col lg:flex-row">
+        <aside
+          className={`border-b border-slate-200 bg-slate-950 text-slate-100 transition-all duration-300 lg:border-b-0 lg:border-r lg:border-slate-800 ${
+            isSidebarCollapsed ? "lg:w-28" : "lg:w-80"
+          }`}
+        >
+          <div className="flex h-full flex-col">
+            <div className={`border-b border-slate-800 ${isSidebarCollapsed ? "px-4 py-6" : "px-6 py-6"}`}>
+              <div className={`flex ${isSidebarCollapsed ? "justify-center" : "items-start justify-between gap-3"}`}>
+                <Link to="/dashboard" className="block min-w-0 flex-1">
+                  <div className={`flex ${isSidebarCollapsed ? "justify-center" : "items-center gap-3"}`}>
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-400/15 text-lg font-semibold text-cyan-300">
+                      SC
+                    </div>
+                    {!isSidebarCollapsed ? (
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
+                          IPTV CRM
+                        </p>
+                        <h1 className="text-xl font-semibold text-white">StreamOps Console</h1>
                       </div>
-                      <div className="hidden md:block text-left">
-                        <div className="text-sm font-medium text-gray-700 dark:text-gray-200">
-                          {user.name}
-                        </div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">
-                          {user.email}
-                        </div>
-                      </div>
-                      <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                    
-                    {showProfileDropdown && (
-                      <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50">
-                        <div className="py-2">
-                          <Link
-                            to="/profile"
-                            className="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-                            onClick={() => setShowProfileDropdown(false)}
-                          >
-                            <div className="flex items-center space-x-2">
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                              </svg>
-                              <span>My Profile</span>
-                            </div>
-                          </Link>
-                          <Link
-                            to="/settings"
-                            className="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-                            onClick={() => setShowProfileDropdown(false)}
-                          >
-                            <div className="flex items-center space-x-2">
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                              </svg>
-                              <span>Settings</span>
-                            </div>
-                          </Link>
-                          <hr className="my-2 border-gray-200 dark:border-gray-700" />
-                          <button
-                            onClick={handleSignOut}
-                            className="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700"
-                          >
-                            <div className="flex items-center space-x-2">
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                              </svg>
-                              <span>Sign Out</span>
-                            </div>
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    ) : null}
                   </div>
-                ) : (
-                  <Link
-                    to="/signin"
-                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                  {!isSidebarCollapsed ? (
+                    <p className="mt-4 text-sm leading-6 text-slate-400">
+                      One place to manage subscriptions, renewals, and customer support.
+                    </p>
+                  ) : null}
+                </Link>
+                {!isSidebarCollapsed ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsSidebarCollapsed(true)}
+                    className="hidden rounded-2xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-900 lg:block"
+                    aria-label="Collapse sidebar"
+                    title="Collapse sidebar"
                   >
-                    Sign In
-                  </Link>
-                )}
+                    <span aria-hidden="true">←</span>
+                  </button>
+                ) : null}
+              </div>
+              {isSidebarCollapsed ? (
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarCollapsed(false)}
+                  className="mt-4 hidden w-full rounded-2xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-900 lg:block"
+                  aria-label="Expand sidebar"
+                  title="Expand sidebar"
+                >
+                  <span aria-hidden="true">→</span>
+                </button>
+              ) : null}
+            </div>
+
+            <nav className={`flex-1 ${isSidebarCollapsed ? "px-3 py-6" : "px-4 py-6"}`}>
+              {!isSidebarCollapsed ? (
+                <p className="px-3 text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+                  Workspace
+                </p>
+              ) : null}
+              <div className="mt-4 space-y-2">
+                {navigationItems.map((item) => {
+                  const isActive =
+                    location.pathname === item.to ||
+                    location.pathname.startsWith(`${item.to}/`);
+
+                  return (
+                    <Link
+                      key={item.to}
+                      to={item.to}
+                      title={isSidebarCollapsed ? item.label : undefined}
+                      className={`block rounded-2xl border transition ${
+                        isActive
+                          ? "border-cyan-400/30 bg-cyan-400/10 text-white"
+                          : "border-transparent bg-slate-900/70 text-slate-300 hover:border-slate-800 hover:bg-slate-900"
+                      } ${isSidebarCollapsed ? "px-3 py-3 text-center" : "px-4 py-4"}`}
+                    >
+                      {isSidebarCollapsed ? (
+                        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-800/80 text-xs font-semibold tracking-[0.18em] text-slate-200">
+                          {item.shortLabel}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-sm font-semibold">{item.label}</div>
+                          <div className="mt-1 text-sm text-slate-400">{item.description}</div>
+                        </>
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            </nav>
+
+            {!isSidebarCollapsed ? (
+              <div className="border-t border-slate-800 px-6 py-5">
+                <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+                  <p className="text-sm font-semibold text-white">Operations priorities</p>
+                  <ul className="mt-3 space-y-2 text-sm text-slate-400">
+                    <li>Keep expiring accounts visible every day.</li>
+                    <li>Resolve failed payments before suspension.</li>
+                    <li>Make customer records clean and searchable.</li>
+                  </ul>
+                </div>
+              </div>
+            ) : (
+              <div className="border-t border-slate-800 px-3 py-5">
+                <div className="rounded-2xl border border-slate-800 bg-slate-900 px-3 py-4 text-center text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+                  Focus
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <div className="flex min-h-screen flex-1 flex-col">
+          <header className="border-b border-slate-200 bg-white/95 px-6 py-5 backdrop-blur">
+            <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+              <div className="flex items-start gap-4">
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarCollapsed((current) => !current)}
+                  className="hidden rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-white lg:block"
+                  aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                  title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                >
+                  <span aria-hidden="true">{isSidebarCollapsed ? "→" : "←"}</span>
+                </button>
+                <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                  {activeItem?.label ?? "Workspace"}
+                </p>
+                <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
+                  {getPageTitle(location.pathname)}
+                </h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                  {activeItem?.description ??
+                    "Manage customers, plans, renewals, and internal administration."}
+                </p>
+                </div>
+              </div>
+
+              <div className="relative" ref={dropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setIsDropdownOpen((open) => !open)}
+                  className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left transition hover:border-slate-300 hover:bg-white"
+                >
+                  <div
+                    className={`flex h-11 w-11 items-center justify-center rounded-full text-sm font-semibold ${
+                      getAvatarTone(currentUser?.name || "Admin")
+                    }`}
+                  >
+                    {getInitials(currentUser?.name || "Admin User")}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-slate-900">
+                      {currentUser?.name || "Administrator"}
+                    </div>
+                    <div className="truncate text-xs text-slate-500">
+                      {currentUser?.email || "No session email"}
+                    </div>
+                  </div>
+                </button>
+
+                {isDropdownOpen ? (
+                  <div className="absolute right-0 z-50 mt-3 w-64 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                    <Link
+                      to="/profile"
+                      className="block rounded-xl px-4 py-3 text-sm text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Manage account
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={handleSignOut}
+                      className="block w-full rounded-xl px-4 py-3 text-left text-sm text-rose-600 transition hover:bg-rose-50"
+                    >
+                      Sign out
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
-          </div>
-        </header>
+          </header>
 
-        {/* Page Content */}
-        <main className="flex-1 p-6">
-          {children}
-        </main>
+          <main className="flex-1 px-6 py-6">
+            <Outlet />
+          </main>
+        </div>
       </div>
     </div>
   );
 };
 
-// Dashboard Page
-const Dashboard = () => (
-  <div className="grid grid-cols-12 gap-6">
-    {/* Metrics Cards */}
-    <div className="col-span-12 lg:col-span-7">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        {/* Customers Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Customers</p>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white">3,782</p>
-            </div>
-            <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900/20 rounded-full flex items-center justify-center">
-              <svg className="w-6 h-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
-              </svg>
-            </div>
-          </div>
-          <div className="mt-4 flex items-center">
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400">
-              <ArrowUpIcon className="w-3 h-3 mr-1" />
-              11.01%
-            </span>
-            <span className="ml-2 text-sm text-gray-600 dark:text-gray-400">vs last month</span>
-          </div>
-        </div>
+const LegacyCustomerRedirect = ({ edit = false }: { edit?: boolean }) => {
+  const { id } = useParams();
 
-        {/* Orders Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Orders</p>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white">5,359</p>
-            </div>
-            <div className="w-12 h-12 bg-green-100 dark:bg-green-900/20 rounded-full flex items-center justify-center">
-              <svg className="w-6 h-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-              </svg>
-            </div>
-          </div>
-          <div className="mt-4 flex items-center">
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400">
-              <ArrowUpIcon className="w-3 h-3 mr-1" />
-              9.05%
-            </span>
-            <span className="ml-2 text-sm text-gray-600 dark:text-gray-400">vs last month</span>
-          </div>
-        </div>
-      </div>
+  if (!id) {
+    return <Navigate to="/customers" replace />;
+  }
 
-      {/* Monthly Sales Chart */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Monthly Sales</h3>
-        <div className="h-64 flex items-center justify-center bg-gray-50 dark:bg-gray-700 rounded-lg">
-          <p className="text-gray-500 dark:text-gray-400">Chart placeholder</p>
-        </div>
-      </div>
-    </div>
-
-    {/* Monthly Target */}
-    <div className="col-span-12 lg:col-span-5">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Monthly Target</h3>
-        <div className="text-center">
-          <div className="relative w-32 h-32 mx-auto mb-4">
-            <div className="w-full h-full bg-blue-100 dark:bg-blue-900/20 rounded-full flex items-center justify-center">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-blue-600 dark:text-blue-400">75.55%</div>
-                <div className="text-xs text-green-600 dark:text-green-400">+10%</div>
-              </div>
-            </div>
-          </div>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-            You earn $3287 today, it's higher than last month. Keep up your good work!
-          </p>
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600 dark:text-gray-400">Target</span>
-              <span className="font-semibold text-gray-900 dark:text-white">$20K</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600 dark:text-gray-400">Revenue</span>
-              <span className="font-semibold text-gray-900 dark:text-white">$20K</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600 dark:text-gray-400">Today</span>
-              <span className="font-semibold text-gray-900 dark:text-white">$20K</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    {/* Statistics Chart */}
-    <div className="col-span-12">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Statistics</h3>
-          <div className="flex space-x-2">
-            <button className="px-3 py-1 text-sm bg-blue-600 text-white rounded-md">Overview</button>
-            <button className="px-3 py-1 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md">Sales</button>
-            <button className="px-3 py-1 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md">Revenue</button>
-          </div>
-        </div>
-        <div className="h-64 flex items-center justify-center bg-gray-50 dark:bg-gray-700 rounded-lg">
-          <p className="text-gray-500 dark:text-gray-400">Chart placeholder</p>
-        </div>
-      </div>
-    </div>
-
-    {/* Demographics and Recent Orders */}
-    <div className="col-span-12 lg:col-span-5">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Customers Demographic</h3>
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <div className="w-6 h-4 bg-blue-600 rounded-sm"></div>
-              <span className="text-sm font-medium text-gray-900 dark:text-white">USA</span>
-            </div>
-            <div className="text-right">
-              <div className="text-sm font-semibold text-gray-900 dark:text-white">2,379 Customers</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">79%</div>
-            </div>
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <div className="w-6 h-4 bg-green-600 rounded-sm"></div>
-              <span className="text-sm font-medium text-gray-900 dark:text-white">France</span>
-            </div>
-            <div className="text-right">
-              <div className="text-sm font-semibold text-gray-900 dark:text-white">589 Customers</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">23%</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    {/* Recent Orders */}
-    <div className="col-span-12 lg:col-span-7">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Recent Orders</h3>
-          <button className="text-sm text-blue-600 dark:text-blue-400 hover:underline">See all</button>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-gray-200 dark:border-gray-700">
-                <th className="text-left py-3 text-sm font-medium text-gray-600 dark:text-gray-400">Product</th>
-                <th className="text-left py-3 text-sm font-medium text-gray-600 dark:text-gray-400">Category</th>
-                <th className="text-left py-3 text-sm font-medium text-gray-600 dark:text-gray-400">Price</th>
-                <th className="text-left py-3 text-sm font-medium text-gray-600 dark:text-gray-400">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="border-b border-gray-200 dark:border-gray-700">
-                <td className="py-3 text-sm font-medium text-gray-900 dark:text-white">Macbook pro 13"</td>
-                <td className="py-3 text-sm text-gray-600 dark:text-gray-400">Laptop</td>
-                <td className="py-3 text-sm text-gray-600 dark:text-gray-400">$2399.00</td>
-                <td className="py-3">
-                  <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400">
-                    Delivered
-                  </span>
-                </td>
-              </tr>
-              <tr className="border-b border-gray-200 dark:border-gray-700">
-                <td className="py-3 text-sm font-medium text-gray-900 dark:text-white">Apple Watch Ultra</td>
-                <td className="py-3 text-sm text-gray-600 dark:text-gray-400">Watch</td>
-                <td className="py-3 text-sm text-gray-600 dark:text-gray-400">$879.00</td>
-                <td className="py-3">
-                  <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-400">
-                    Pending
-                  </span>
-                </td>
-              </tr>
-              <tr className="border-b border-gray-200 dark:border-gray-700">
-                <td className="py-3 text-sm font-medium text-gray-900 dark:text-white">iPhone 15 Pro Max</td>
-                <td className="py-3 text-sm text-gray-600 dark:text-gray-400">SmartPhone</td>
-                <td className="py-3 text-sm text-gray-600 dark:text-gray-400">$1869.00</td>
-                <td className="py-3">
-                  <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400">
-                    Delivered
-                  </span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </div>
-);
-
-// Generic Page Component
-const GenericPage = ({ title, description }: { title: string; description: string }) => (
-  <div className="space-y-6">
-    <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">{title}</h2>
-      <p className="text-gray-600 dark:text-gray-400 mb-6">{description}</p>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-          <h4 className="font-semibold text-gray-900 dark:text-white mb-2">Feature 1</h4>
-          <p className="text-sm text-gray-600 dark:text-gray-400">This is a sample feature card.</p>
-        </div>
-        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-          <h4 className="font-semibold text-gray-900 dark:text-white mb-2">Feature 2</h4>
-          <p className="text-sm text-gray-600 dark:text-gray-400">This is another sample feature card.</p>
-        </div>
-        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-          <h4 className="font-semibold text-gray-900 dark:text-white mb-2">Feature 3</h4>
-          <p className="text-sm text-gray-600 dark:text-gray-400">This is a third sample feature card.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-);
-
-// AuthWrapper component to handle routes that don't need the layout
-const AuthWrapper = ({ children }: { children: React.ReactNode }) => {
-  return <div>{children}</div>;
+  return <Navigate to={edit ? `/customers/${id}/edit` : `/customers/${id}`} replace />;
 };
 
 export default function App() {
-  // Initialize authentication and database on app start
-  useEffect(() => {
-    initializeAuth();
-  }, []);
-
   return (
-    <Router>
+    <BrowserRouter>
       <Routes>
-        {/* Auth routes (without layout) */}
-        <Route path="/signin" element={<AuthWrapper><SignIn /></AuthWrapper>} />
-        <Route path="/signup" element={<AuthWrapper><SignUp /></AuthWrapper>} />
-        <Route path="/forgot-password" element={<AuthWrapper><GenericPage title="Forgot Password" description="Reset your password" /></AuthWrapper>} />
-        
-        {/* Protected routes (with layout) */}
-        <Route path="/*" element={
-          <ProtectedRoute>
-            <Layout>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/dashboard" element={<Dashboard />} />
-                <Route path="/ecommerce" element={<ECommerce />} />
-                <Route path="/analytics" element={<Analytics />} />
-                <Route path="/marketing" element={<GenericPage title="Marketing" description="Marketing campaigns and customer engagement tools." />} />
-                <Route path="/crm" element={<GenericPage title="CRM" description="Customer relationship management system." />} />
-                <Route path="/stocks" element={<GenericPage title="Stocks" description="Stock market tracking and portfolio management." />} />
-                <Route path="/calendar" element={<Calendar />} />
-                <Route path="/profile" element={<Profile />} />
-                <Route path="/tasks" element={<GenericPage title="Tasks" description="Task management and project tracking." />} />
-                <Route path="/forms" element={<AddCustomer />} />
-                <Route path="/tables" element={<Customers />} />
-                <Route path="/customer/:id" element={<CustomerDetail />} />
-                <Route path="/pages" element={<GenericPage title="Pages" description="Various page templates and layouts." />} />
-                <Route path="/charts" element={<Charts />} />
-                <Route path="/auth" element={<GenericPage title="Authentication" description="Login, registration, and user authentication." />} />
-                <Route path="/settings" element={<GenericPage title="Settings" description="User settings and preferences." />} />
-              </Routes>
-            </Layout>
-          </ProtectedRoute>
-        } />
+        <Route path="/" element={<HomePage />} />
+        <Route path="/signin" element={<SignIn />} />
+        <Route path="/portal/signin" element={<PortalSignIn />} />
+        <Route
+          path="/portal"
+          element={
+            <CustomerProtectedRoute>
+              <CustomerPortalDashboard />
+            </CustomerProtectedRoute>
+          }
+        />
+        <Route
+          element={
+            <ProtectedRoute>
+              <AppShell />
+            </ProtectedRoute>
+          }
+        >
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/customers" element={<Customers />} />
+          <Route path="/customers/new" element={<AddCustomer />} />
+          <Route path="/renewals" element={<PaymentStatusReview />} />
+          <Route path="/service-requests" element={<ServiceRequestsReview />} />
+          <Route path="/portal-access" element={<PortalAccessAdmin />} />
+          <Route path="/customers/:id" element={<CustomerDetail />} />
+          <Route path="/customers/:id/edit" element={<EditCustomer />} />
+          <Route path="/profile" element={<Profile />} />
+
+          <Route path="/forms" element={<Navigate to="/customers/new" replace />} />
+          <Route path="/tables" element={<Navigate to="/customers" replace />} />
+          <Route path="/settings" element={<Navigate to="/profile" replace />} />
+          <Route path="/customer/:id" element={<LegacyCustomerRedirect />} />
+          <Route path="/customer/:id/edit" element={<LegacyCustomerRedirect edit />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Route>
       </Routes>
-    </Router>
+    </BrowserRouter>
   );
 }
