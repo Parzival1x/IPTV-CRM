@@ -140,9 +140,7 @@ admin_dashboard/
     main.tsx
   .env.example
   start.bat
-  start-backend.bat
   restart-backend.bat
-  close-ports.bat
   setup-notifications.bat
   README.md
 ```
@@ -478,14 +476,6 @@ If port `3001` is stuck or you want a clean dev restart:
 restart-backend.bat
 ```
 
-### Close Occupied Ports
-
-If local ports are stuck:
-
-```powershell
-close-ports.bat
-```
-
 ### Build Frontend
 
 ```powershell
@@ -686,14 +676,8 @@ From [backend/package.json](E:\projects\admin_dashboard\backend\package.json):
 - [start.bat](E:\projects\admin_dashboard\start.bat)
   Starts frontend and backend together.
 
-- [start-backend.bat](E:\projects\admin_dashboard\start-backend.bat)
-  Starts the backend only.
-
 - [restart-backend.bat](E:\projects\admin_dashboard\restart-backend.bat)
-  Kills the process on port `3001` and starts backend dev mode again.
-
-- [close-ports.bat](E:\projects\admin_dashboard\close-ports.bat)
-  Frees local dev ports if they are occupied.
+  Restarts the backend dev server when port `3001` is already in use.
 
 - [setup-notifications.bat](E:\projects\admin_dashboard\setup-notifications.bat)
   Runs the backend notification setup helper.
@@ -820,12 +804,6 @@ Use:
 
 ```powershell
 restart-backend.bat
-```
-
-or:
-
-```powershell
-close-ports.bat
 ```
 
 ### Admin Login Fails
