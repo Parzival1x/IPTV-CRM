@@ -10,18 +10,18 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-import ProtectedRoute from "./components/ProtectedRoute";
 import CustomerProtectedRoute from "./components/CustomerProtectedRoute";
+import ProtectedRoute from "./components/ProtectedRoute";
 import SignIn from "./pages/AuthPages/SignIn";
-import CustomerPortalDashboard from "./pages/CustomerPortalDashboard";
 import CustomerDetail from "./pages/CustomerDetail";
+import CustomerPortalDashboard from "./pages/CustomerPortalDashboard";
 import Dashboard from "./pages/Dashboard";
 import EditCustomer from "./pages/EditCustomer";
 import AddCustomer from "./pages/Forms";
 import HomePage from "./pages/HomePage";
 import PaymentStatusReview from "./pages/PaymentStatusReview";
-import PortalSignIn from "./pages/PortalSignIn";
 import PortalAccessAdmin from "./pages/PortalAccessAdmin";
+import PortalSignIn from "./pages/PortalSignIn";
 import Profile from "./pages/Profile";
 import ServiceRequestsReview from "./pages/ServiceRequestsReview";
 import Customers from "./pages/Tables";
@@ -221,10 +221,18 @@ const AppShell = () => {
           }`}
         >
           <div className="flex h-full flex-col">
-            <div className={`border-b border-slate-800 ${isSidebarCollapsed ? "px-4 py-6" : "px-6 py-6"}`}>
-              <div className={`flex ${isSidebarCollapsed ? "justify-center" : "items-start justify-between gap-3"}`}>
+            <div
+              className={`border-b border-slate-800 ${
+                isSidebarCollapsed ? "px-4 py-6" : "px-6 py-6"
+              }`}
+            >
+              <div
+                className={`flex ${isSidebarCollapsed ? "justify-center" : "items-start gap-3"}`}
+              >
                 <Link to="/dashboard" className="block min-w-0 flex-1">
-                  <div className={`flex ${isSidebarCollapsed ? "justify-center" : "items-center gap-3"}`}>
+                  <div
+                    className={`flex ${isSidebarCollapsed ? "justify-center" : "items-center gap-3"}`}
+                  >
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-400/15 text-lg font-semibold text-cyan-300">
                       SC
                     </div>
@@ -233,7 +241,9 @@ const AppShell = () => {
                         <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
                           IPTV CRM
                         </p>
-                        <h1 className="text-xl font-semibold text-white">StreamOps Console</h1>
+                        <h1 className="text-xl font-semibold text-white">
+                          StreamOps Console
+                        </h1>
                       </div>
                     ) : null}
                   </div>
@@ -243,29 +253,7 @@ const AppShell = () => {
                     </p>
                   ) : null}
                 </Link>
-                {!isSidebarCollapsed ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsSidebarCollapsed(true)}
-                    className="hidden rounded-2xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-900 lg:block"
-                    aria-label="Collapse sidebar"
-                    title="Collapse sidebar"
-                  >
-                    <span aria-hidden="true">←</span>
-                  </button>
-                ) : null}
               </div>
-              {isSidebarCollapsed ? (
-                <button
-                  type="button"
-                  onClick={() => setIsSidebarCollapsed(false)}
-                  className="mt-4 hidden w-full rounded-2xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-900 lg:block"
-                  aria-label="Expand sidebar"
-                  title="Expand sidebar"
-                >
-                  <span aria-hidden="true">→</span>
-                </button>
-              ) : null}
             </div>
 
             <nav className={`flex-1 ${isSidebarCollapsed ? "px-3 py-6" : "px-4 py-6"}`}>
@@ -298,7 +286,9 @@ const AppShell = () => {
                       ) : (
                         <>
                           <div className="text-sm font-semibold">{item.label}</div>
-                          <div className="mt-1 text-sm text-slate-400">{item.description}</div>
+                          <div className="mt-1 text-sm text-slate-400">
+                            {item.description}
+                          </div>
                         </>
                       )}
                     </Link>
@@ -325,6 +315,31 @@ const AppShell = () => {
                 </div>
               </div>
             )}
+
+            <div className={`${isSidebarCollapsed ? "px-3 pb-5" : "px-6 pb-5"}`}>
+              <button
+                type="button"
+                onClick={() => setIsSidebarCollapsed((current) => !current)}
+                className={`hidden w-full items-center rounded-2xl border border-slate-800 bg-slate-900/80 text-sm font-medium text-slate-300 transition hover:border-slate-700 hover:bg-slate-900 lg:flex ${
+                  isSidebarCollapsed
+                    ? "justify-center px-3 py-3"
+                    : "justify-between px-4 py-3"
+                }`}
+                aria-label={isSidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
+                title={isSidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
+              >
+                {isSidebarCollapsed ? (
+                  <span className="text-xs font-semibold uppercase tracking-[0.2em]">
+                    Expand
+                  </span>
+                ) : (
+                  <>
+                    <span>Collapse navigation</span>
+                    <span aria-hidden="true">←</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </aside>
 
@@ -332,26 +347,17 @@ const AppShell = () => {
           <header className="border-b border-slate-200 bg-white/95 px-6 py-5 backdrop-blur">
             <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
               <div className="flex items-start gap-4">
-                <button
-                  type="button"
-                  onClick={() => setIsSidebarCollapsed((current) => !current)}
-                  className="hidden rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-white lg:block"
-                  aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                  title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                >
-                  <span aria-hidden="true">{isSidebarCollapsed ? "→" : "←"}</span>
-                </button>
                 <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                  {activeItem?.label ?? "Workspace"}
-                </p>
-                <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-                  {getPageTitle(location.pathname)}
-                </h2>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-                  {activeItem?.description ??
-                    "Manage customers, plans, renewals, and internal administration."}
-                </p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                    {activeItem?.label ?? "Workspace"}
+                  </p>
+                  <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
+                    {getPageTitle(location.pathname)}
+                  </h2>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                    {activeItem?.description ??
+                      "Manage customers, plans, renewals, and internal administration."}
+                  </p>
                 </div>
               </div>
 
