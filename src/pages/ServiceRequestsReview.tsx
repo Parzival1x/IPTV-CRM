@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { adminNotificationsAPI, serviceRequestsAPI } from "../services/api";
 
+import { formatCurrencyOrFallback as formatCurrency } from "../utils/currency";
 type ServiceRequest = {
   id: string;
   customerId: string;
@@ -40,20 +41,6 @@ type AdminNotification = {
 const formatDate = (value: string) => {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "Not set" : parsed.toLocaleString();
-};
-
-const formatCurrency = (value: string) => {
-  const numeric = parseFloat(String(value || "").replace(/[^0-9.-]/g, ""));
-  if (!Number.isFinite(numeric)) {
-    return "Not set";
-  }
-
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(numeric);
 };
 
 const getStatusTone = (status: ServiceRequest["status"]) => {

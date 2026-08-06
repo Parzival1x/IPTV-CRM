@@ -1,29 +1,24 @@
 const bcrypt = require('bcryptjs');
 const { getSupabaseServiceClient } = require('../config/supabase');
+const { defaultCurrency, portalPasswordTtlHours } = require('../config/runtime');
+const logger = require('../config/logger');
 const {
   generateCustomerCode,
   generateServiceId,
   generateTransactionId,
   generatePortalPassword
 } = require('../utils/ids');
-
-const paymentModeToDb = {
-  Cash: 'cash',
-  'Credit Card': 'credit_card',
-  'Debit Card': 'debit_card',
-  'Bank Transfer': 'bank_transfer',
-  PayPal: 'paypal',
-  Other: 'other'
-};
-
-const paymentModeFromDb = {
-  cash: 'Cash',
-  credit_card: 'Credit Card',
-  debit_card: 'Debit Card',
-  bank_transfer: 'Bank Transfer',
-  paypal: 'PayPal',
-  other: 'Other'
-};
+const {
+  paymentModeFromDb,
+  normalizePaymentMode,
+  mapSubscriptionStatus,
+  parseNumeric,
+  formatAmount,
+  formatDate,
+  normalizePhoneNumber,
+  addMonths,
+  buildExpiryDate
+} = require('../utils/customerMapping');
 
 const assertNoSupabaseError = (error, message) => {
   if (!error) {
@@ -37,101 +32,65 @@ const assertNoSupabaseError = (error, message) => {
   throw wrappedError;
 };
 
-const formatDate = (value) => {
-  if (!value) {
-    return '';
-  }
+const SUBSCRIPTION_SELECT = `
+  id,
+  customer_id,
+  plan_id,
+  activation_date,
+  expiry_date,
+  status,
+  discount,
+  auto_renew,
+  service_label,
+  service_code,
+  transaction_id,
+  payment_mode,
+  amount,
+  currency,
+  cycle_paid_amount,
+  device_box,
+  device_mac,
+  portal_url,
+  billing_url,
+  metadata,
+  subscription_plans (
+    id,
+    plan_code,
+    name,
+    price,
+    duration_days,
+    duration_months,
+    max_connections,
+    description
+  )
+`;
 
-  return String(value).slice(0, 10);
-};
-
-const formatAmount = (value) => {
-  const parsed = Number(value || 0);
-  return Number.isFinite(parsed) ? parsed.toFixed(2) : '0.00';
-};
-
-const parseNumeric = (value) => {
-  if (value === null || value === undefined || value === '') {
-    return 0;
-  }
-
-  const parsed = Number(String(value).replace(/[^0-9.-]/g, ''));
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
-const normalizePhoneNumber = (value) => {
-  if (!value) {
-    return null;
-  }
-
-  const rawValue = String(value).trim();
-  const sanitized = rawValue.startsWith('+')
-    ? `+${rawValue.slice(1).replace(/\D/g, '')}`
-    : rawValue.replace(/\D/g, '');
-
-  if (!sanitized) {
-    return null;
-  }
-
-  return sanitized;
-};
-
-const normalizePaymentMode = (value) => {
-  if (!value) {
-    return 'other';
-  }
-
-  const directMatch = paymentModeToDb[value];
-  if (directMatch) {
-    return directMatch;
-  }
-
-  const normalized = String(value).trim().toLowerCase().replace(/\s+/g, '_');
-  return paymentModeFromDb[normalized] ? normalized : 'other';
-};
-
-const mapSubscriptionStatus = (value) => {
-  const normalized = String(value || '').trim().toLowerCase();
-
-  if (['active', 'expired', 'cancelled', 'suspended', 'draft'].includes(normalized)) {
-    return normalized;
-  }
-
-  return 'active';
-};
-
-const getDurationDays = (durationMonths) => {
-  const parsedMonths = Number(durationMonths);
-  const safeMonths = Number.isFinite(parsedMonths) && parsedMonths > 0 ? parsedMonths : 12;
-  return safeMonths * 30;
-};
-
-const buildExpiryDate = (startDate, explicitExpiryDate, durationMonths) => {
-  if (explicitExpiryDate) {
-    return explicitExpiryDate;
-  }
-
-  const baseDateValue = startDate || new Date().toISOString().slice(0, 10);
-  const baseDate = new Date(baseDateValue);
-
-  if (Number.isNaN(baseDate.getTime())) {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  baseDate.setMonth(baseDate.getMonth() + Math.max(Number(durationMonths) || 12, 1));
-  return baseDate.toISOString().slice(0, 10);
-};
-
-const addDays = (value, days) => {
-  const baseDate = new Date(value || new Date().toISOString().slice(0, 10));
-
-  if (Number.isNaN(baseDate.getTime())) {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  baseDate.setDate(baseDate.getDate() + Math.max(Number(days) || 30, 1));
-  return baseDate.toISOString().slice(0, 10);
-};
+const PAYMENT_SELECT = `
+  id,
+  customer_id,
+  subscription_id,
+  amount,
+  discount,
+  tax,
+  final_amount,
+  payment_mode,
+  transaction_id,
+  status,
+  payment_date,
+  next_due_date,
+  currency,
+  notes,
+  payment_allocations (
+    id,
+    subscription_id,
+    amount,
+    renewed,
+    consumed_at,
+    customer_subscriptions (
+      service_label
+    )
+  )
+`;
 
 const mapRowToSubscription = (row) => {
   if (!row) {
@@ -142,6 +101,8 @@ const mapRowToSubscription = (row) => {
     ? row.subscription_plans[0]
     : row.subscription_plans || null;
   const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const netAmount = Math.max(parseNumeric(row.amount) - parseNumeric(row.discount), 0);
+  const cyclePaid = parseNumeric(row.cycle_paid_amount);
 
   return {
     id: row.id,
@@ -155,6 +116,7 @@ const mapRowToSubscription = (row) => {
     discount: formatAmount(row.discount),
     autoRenew: Boolean(row.auto_renew),
     amount: formatAmount(row.amount),
+    currency: row.currency || defaultCurrency,
     paymentMode: paymentModeFromDb[row.payment_mode] || 'Other',
     transactionId: row.transaction_id || '',
     serviceCode: row.service_code || '',
@@ -164,9 +126,16 @@ const mapRowToSubscription = (row) => {
     portalUrl: row.portal_url || '',
     billingUrl: row.billing_url || '',
     maxConnections: Number(plan?.max_connections || metadata.maxConnections || 1),
+    durationMonths: Number(plan?.duration_months || metadata.durationMonths || 12),
     features: Array.isArray(metadata.features) ? metadata.features : [],
     category: metadata.category || '',
     sku: metadata.sku || '',
+    // How far the customer has paid into the current billing cycle. Before
+    // this existed a part payment was written as a `pending` row that no
+    // balance calculation counted, so the money disappeared from the UI.
+    cyclePaidAmount: formatAmount(cyclePaid),
+    outstandingAmount: formatAmount(Math.max(netAmount - cyclePaid, 0)),
+    isPartiallyPaid: cyclePaid > 0 && cyclePaid < netAmount,
     metadata
   };
 };
@@ -176,122 +145,102 @@ const mapRowToPayment = (row) => {
     return null;
   }
 
-  const subscription = Array.isArray(row.customer_subscriptions)
-    ? row.customer_subscriptions[0]
-    : row.customer_subscriptions || null;
-  const plan = Array.isArray(subscription?.subscription_plans)
-    ? subscription.subscription_plans[0]
-    : subscription?.subscription_plans || null;
+  const allocations = Array.isArray(row.payment_allocations) ? row.payment_allocations : [];
+  const serviceAllocations = allocations.filter((allocation) => allocation.subscription_id);
+  const creditAllocations = allocations.filter((allocation) => !allocation.subscription_id);
+
+  const labelFor = (allocation) => {
+    const subscription = Array.isArray(allocation.customer_subscriptions)
+      ? allocation.customer_subscriptions[0]
+      : allocation.customer_subscriptions;
+    return subscription?.service_label || 'Service payment';
+  };
+
+  const serviceLabel = serviceAllocations.length === 0
+    ? 'Account credit top-up'
+    : serviceAllocations.length === 1
+      ? labelFor(serviceAllocations[0])
+      : `${serviceAllocations.length} services`;
 
   return {
     id: row.id,
     subscriptionId: row.subscription_id || null,
-    serviceLabel:
-      subscription?.service_label ||
-      plan?.name ||
-      (row.subscription_id ? 'Service payment' : 'Account credit top-up'),
+    serviceLabel,
     amount: formatAmount(row.amount),
     finalAmount: formatAmount(row.final_amount),
     discount: formatAmount(row.discount),
     tax: formatAmount(row.tax),
+    currency: row.currency || defaultCurrency,
     paymentMode: paymentModeFromDb[row.payment_mode] || 'Other',
     status: row.status || 'paid',
     transactionId: row.transaction_id || '',
     paymentDate: row.payment_date || '',
-    nextDueDate: formatDate(row.next_due_date)
+    nextDueDate: formatDate(row.next_due_date),
+    notes: row.notes || '',
+    isRefundable: row.status === 'paid',
+    allocations: allocations.map((allocation) => ({
+      id: allocation.id,
+      subscriptionId: allocation.subscription_id || null,
+      serviceLabel: allocation.subscription_id ? labelFor(allocation) : 'Account credit',
+      amount: formatAmount(allocation.amount),
+      renewed: Boolean(allocation.renewed),
+      consumed: Boolean(allocation.consumed_at)
+    })),
+    creditAmount: formatAmount(
+      creditAllocations.reduce((sum, allocation) => sum + parseNumeric(allocation.amount), 0)
+    )
   };
 };
 
-const summarizeFinancials = (subscriptions = [], payments = []) => {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+// The cached total_credit / already_given / remaining_credits columns are no
+// longer written. They were maintained by application code across several
+// un-batched writes, so a failure mid-sequence left them wrong, and their
+// names did not describe what they held -- total_credit stored total *paid*,
+// already_given stored the recurring amount. These numbers now come from the
+// customer_financials view, computed from the payments and subscriptions that
+// produced them, so they cannot drift.
+const EMPTY_SUMMARY = {
+  recurringAmount: '0.00',
+  dueNow: '0.00',
+  overdueAmount: '0.00',
+  totalPaid: '0.00',
+  totalRefunded: '0.00',
+  availableCredit: '0.00',
+  outstandingBalance: '0.00',
+  dueSoonServiceCount: 0,
+  overdueServiceCount: 0,
+  activeServiceCount: 0,
+  serviceCount: 0,
+  lastPaymentDate: null
+};
 
-  const billableStatuses = new Set(['active', 'expired', 'suspended']);
-  const recurringAmount = subscriptions
-    .filter((subscription) => billableStatuses.has(subscription.status))
-    .reduce((sum, subscription) => sum + parseNumeric(subscription.amount), 0);
-
-  let dueNow = 0;
-  let overdueAmount = 0;
-  let dueSoonServiceCount = 0;
-  let overdueServiceCount = 0;
-
-  for (const subscription of subscriptions) {
-    if (!billableStatuses.has(subscription.status)) {
-      continue;
-    }
-
-    const amount = parseNumeric(subscription.amount);
-    const expiry = new Date(subscription.expiryDate);
-    const isInvalidExpiry = Number.isNaN(expiry.getTime());
-
-    if (subscription.status === 'expired' || subscription.status === 'suspended') {
-      dueNow += amount;
-      overdueAmount += amount;
-      overdueServiceCount += 1;
-      continue;
-    }
-
-    if (isInvalidExpiry) {
-      continue;
-    }
-
-    expiry.setHours(0, 0, 0, 0);
-    const diffDays = Math.ceil((expiry.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-
-    if (diffDays < 0) {
-      dueNow += amount;
-      overdueAmount += amount;
-      overdueServiceCount += 1;
-    } else if (diffDays <= 7) {
-      dueNow += amount;
-      dueSoonServiceCount += 1;
-    }
+const mapFinancialsRow = (row) => {
+  if (!row) {
+    return { ...EMPTY_SUMMARY };
   }
 
-  const totalPaid = payments.reduce((sum, payment) => {
-    const paymentAmount = parseNumeric(payment.finalAmount);
-
-    if (payment.status === 'refunded') {
-      return sum - paymentAmount;
-    }
-
-    if (payment.status === 'paid') {
-      return sum + paymentAmount;
-    }
-
-    return sum;
-  }, 0);
-
-  const availableCredit = Math.max(totalPaid - recurringAmount, 0);
-  const outstandingBalance = Math.max(dueNow - availableCredit, 0);
-
   return {
-    recurringAmount: formatAmount(recurringAmount),
-    dueNow: formatAmount(dueNow),
-    overdueAmount: formatAmount(overdueAmount),
-    totalPaid: formatAmount(totalPaid),
-    availableCredit: formatAmount(availableCredit),
-    outstandingBalance: formatAmount(outstandingBalance),
-    dueSoonServiceCount,
-    overdueServiceCount
+    recurringAmount: formatAmount(row.recurring_amount),
+    dueNow: formatAmount(row.due_now),
+    overdueAmount: formatAmount(row.overdue_amount),
+    totalPaid: formatAmount(row.total_paid),
+    totalRefunded: formatAmount(row.total_refunded),
+    availableCredit: formatAmount(row.available_credit),
+    outstandingBalance: formatAmount(row.outstanding_balance),
+    dueSoonServiceCount: Number(row.due_soon_service_count || 0),
+    overdueServiceCount: Number(row.overdue_service_count || 0),
+    activeServiceCount: Number(row.active_service_count || 0),
+    serviceCount: Number(row.service_count || 0),
+    lastPaymentDate: row.last_payment_date || null
   };
 };
 
-const mapRowToCustomer = (row, subscriptions = [], payments = []) => {
+const mapRowToCustomer = (row, subscriptions = [], payments = [], summary = null) => {
   if (!row) {
     return null;
   }
 
-  const derivedPaymentSummary = summarizeFinancials(subscriptions, payments);
-  const hasRecordedPayments = payments.length > 0;
-  const paymentSummary = {
-    ...derivedPaymentSummary,
-    totalPaid: hasRecordedPayments ? derivedPaymentSummary.totalPaid : formatAmount(row.total_credit),
-    availableCredit: hasRecordedPayments
-      ? derivedPaymentSummary.availableCredit
-      : formatAmount(row.remaining_credits)
-  };
+  const paymentSummary = summary || { ...EMPTY_SUMMARY };
 
   return {
     id: row.id,
@@ -314,17 +263,20 @@ const mapRowToCustomer = (row, subscriptions = [], payments = []) => {
     paymentDate: formatDate(row.payment_date),
     paymentMode: paymentModeFromDb[row.payment_mode] || 'Other',
     amount: formatAmount(row.amount),
+    currency: row.currency || defaultCurrency,
     expiryDate: formatDate(row.expiry_date),
     totalCredit: paymentSummary.totalPaid,
-    alreadyGiven: hasRecordedPayments
-      ? paymentSummary.recurringAmount
-      : formatAmount(row.already_given),
+    alreadyGiven: paymentSummary.recurringAmount,
     remainingCredits: paymentSummary.availableCredit,
     note: row.notes || '',
     serviceDuration: row.service_duration ? String(row.service_duration) : '',
     portalAccessEnabled: row.portal_access_enabled !== false,
     portalResetRequired: row.portal_reset_required !== false,
     portalLastLogin: row.portal_last_login || null,
+    portalPasswordExpiresAt: row.portal_password_expires_at || null,
+    deletedAt: row.deleted_at || null,
+    whatsappOptIn: row.whatsapp_opt_in !== false,
+    emailOptIn: row.email_opt_in !== false,
     subscriptions,
     payments,
     paymentSummary
@@ -333,114 +285,39 @@ const mapRowToCustomer = (row, subscriptions = [], payments = []) => {
 
 const mapPayloadToRow = (payload) => {
   const row = {};
+  const set = (key, column, transform = (value) => value) => {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      row[column] = transform(payload[key]);
+    }
+  };
 
-  if (Object.prototype.hasOwnProperty.call(payload, 'name')) {
-    row.name = String(payload.name).trim();
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'customerCode')) {
-    row.customer_code = payload.customerCode || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'serviceId')) {
-    row.service_id = payload.serviceId || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'transactionId')) {
-    row.transaction_id = payload.transactionId || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'email')) {
-    row.email = payload.email ? String(payload.email).trim().toLowerCase() : null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'phone')) {
-    row.phone = normalizePhoneNumber(payload.phone);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'whatsappNumber')) {
-    row.whatsapp_number = normalizePhoneNumber(payload.whatsappNumber);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'address')) {
-    row.address = payload.address || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'city')) {
-    row.city = payload.city || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'country')) {
-    row.country = payload.country || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'status')) {
-    row.status = payload.status || 'pending';
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'avatar')) {
-    row.avatar = payload.avatar || '/images/user/user-02.png';
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'role')) {
-    row.role = payload.role || 'customer';
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'mac')) {
-    row.mac = payload.mac || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'box')) {
-    row.box = payload.box || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'startDate')) {
-    row.start_date = payload.startDate || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'paymentDate')) {
-    row.payment_date = payload.paymentDate || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'paymentMode')) {
-    row.payment_mode = normalizePaymentMode(payload.paymentMode);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'amount')) {
-    row.amount = parseNumeric(payload.amount);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'expiryDate')) {
-    row.expiry_date = payload.expiryDate || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'totalCredit')) {
-    row.total_credit = parseNumeric(payload.totalCredit);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'alreadyGiven')) {
-    row.already_given = parseNumeric(payload.alreadyGiven);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'remainingCredits')) {
-    row.remaining_credits = parseNumeric(payload.remainingCredits);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'note')) {
-    row.notes = payload.note || null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'serviceDuration')) {
-    row.service_duration = payload.serviceDuration ? Number(payload.serviceDuration) : null;
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'portalAccessEnabled')) {
-    row.portal_access_enabled = Boolean(payload.portalAccessEnabled);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(payload, 'portalResetRequired')) {
-    row.portal_reset_required = Boolean(payload.portalResetRequired);
-  }
+  set('name', 'name', (value) => String(value).trim());
+  set('customerCode', 'customer_code', (value) => value || null);
+  set('serviceId', 'service_id', (value) => value || null);
+  set('transactionId', 'transaction_id', (value) => value || null);
+  set('email', 'email', (value) => (value ? String(value).trim().toLowerCase() : null));
+  set('phone', 'phone', normalizePhoneNumber);
+  set('whatsappNumber', 'whatsapp_number', normalizePhoneNumber);
+  set('address', 'address', (value) => value || null);
+  set('city', 'city', (value) => value || null);
+  set('country', 'country', (value) => value || null);
+  set('status', 'status', (value) => value || 'pending');
+  set('avatar', 'avatar', (value) => value || '/images/user/user-02.png');
+  set('role', 'role', (value) => value || 'customer');
+  set('mac', 'mac', (value) => value || null);
+  set('box', 'box', (value) => value || null);
+  set('startDate', 'start_date', (value) => value || null);
+  set('paymentDate', 'payment_date', (value) => value || null);
+  set('paymentMode', 'payment_mode', normalizePaymentMode);
+  set('amount', 'amount', parseNumeric);
+  set('currency', 'currency', (value) => String(value || defaultCurrency).toUpperCase());
+  set('expiryDate', 'expiry_date', (value) => value || null);
+  set('note', 'notes', (value) => value || null);
+  set('serviceDuration', 'service_duration', (value) => (value ? Number(value) : null));
+  set('portalAccessEnabled', 'portal_access_enabled', Boolean);
+  set('portalResetRequired', 'portal_reset_required', Boolean);
+  set('whatsappOptIn', 'whatsapp_opt_in', Boolean);
+  set('emailOptIn', 'email_opt_in', Boolean);
 
   return row;
 };
@@ -466,95 +343,90 @@ const createUniqueReference = async (column, generator) => {
   throw new Error(`Unable to generate a unique ${column}`);
 };
 
-const getSubscriptionsByCustomerId = async (customerId) => {
+const getFinancialsFor = async (customerIds) => {
+  const ids = customerIds.filter(Boolean);
+
+  if (ids.length === 0) {
+    return new Map();
+  }
+
   const supabase = getSupabaseServiceClient();
   const { data, error } = await supabase
-    .from('customer_subscriptions')
-    .select(`
-      id,
-      customer_id,
-      plan_id,
-      activation_date,
-      expiry_date,
-      status,
-      discount,
-      auto_renew,
-      service_label,
-      service_code,
-      transaction_id,
-      payment_mode,
-      amount,
-      device_box,
-      device_mac,
-      portal_url,
-      billing_url,
-      metadata,
-      subscription_plans (
-        id,
-        plan_code,
-        name,
-        price,
-        duration_days,
-        max_connections,
-        description
-      )
-    `)
-    .eq('customer_id', customerId)
-    .order('activation_date', { ascending: false });
+    .from('customer_financials')
+    .select('*')
+    .in('customer_id', ids);
 
-  assertNoSupabaseError(error, 'Unable to fetch customer subscriptions');
-  return (data || []).map(mapRowToSubscription).filter(Boolean);
+  assertNoSupabaseError(error, 'Unable to fetch customer financials');
+
+  return new Map((data || []).map((row) => [row.customer_id, mapFinancialsRow(row)]));
 };
 
-const getPaymentsByCustomerId = async (customerId) => {
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+// Previously this upserted on plan_code every time any service was saved, so
+// giving one customer a negotiated price on IPTV-PRE-001 rewrote that plan's
+// price, duration and connection limit for every other customer on it. The
+// plan catalogue is shared data; per-customer pricing belongs on the
+// subscription row, where it already lives. This now only ever creates a plan
+// that does not exist, and never modifies one that does.
+const resolveSubscriptionPlan = async (service) => {
   const supabase = getSupabaseServiceClient();
+  const planCode = service.planCode || null;
+
+  if (planCode) {
+    const { data: existing, error: lookupError } = await supabase
+      .from('subscription_plans')
+      .select('*')
+      .eq('plan_code', planCode)
+      .maybeSingle();
+
+    assertNoSupabaseError(lookupError, 'Unable to look up subscription plan');
+
+    if (existing) {
+      return existing;
+    }
+  }
+
+  const row = {
+    plan_code: planCode,
+    name: service.name || 'Primary IPTV Service',
+    price: service.amount,
+    duration_days: service.durationMonths * 30,
+    duration_months: service.durationMonths,
+    max_connections: service.maxConnections,
+    currency: service.currency || defaultCurrency,
+    description: service.description || null,
+    is_active: true
+  };
+
   const { data, error } = await supabase
-    .from('payments')
-    .select(`
-      id,
-      customer_id,
-      subscription_id,
-      amount,
-      discount,
-      tax,
-      final_amount,
-      payment_mode,
-      transaction_id,
-      status,
-      payment_date,
-      next_due_date,
-      customer_subscriptions (
-        service_label,
-        subscription_plans (
-          name
-        )
-      )
-    `)
-    .eq('customer_id', customerId)
-    .order('payment_date', { ascending: false });
+    .from('subscription_plans')
+    .insert(row)
+    .select('*')
+    .single();
 
-  assertNoSupabaseError(error, 'Unable to fetch customer payments');
-  return (data || []).map(mapRowToPayment).filter(Boolean);
+  // Another request may have created the same plan_code between the lookup and
+  // the insert. Re-read rather than failing the customer's save.
+  if (error?.code === '23505' && planCode) {
+    const { data: raced, error: reReadError } = await supabase
+      .from('subscription_plans')
+      .select('*')
+      .eq('plan_code', planCode)
+      .single();
+
+    assertNoSupabaseError(reReadError, 'Unable to resolve subscription plan after a conflict');
+    return raced;
+  }
+
+  assertNoSupabaseError(error, 'Unable to create subscription plan');
+  return data;
 };
 
-const persistFinancialSnapshot = async (customerId, subscriptions = null, payments = null) => {
-  const supabase = getSupabaseServiceClient();
-  const resolvedSubscriptions = subscriptions || (await getSubscriptionsByCustomerId(customerId));
-  const resolvedPayments = payments || (await getPaymentsByCustomerId(customerId));
-  const summary = summarizeFinancials(resolvedSubscriptions, resolvedPayments);
-
-  const { error } = await supabase
-    .from('customers')
-    .update({
-      total_credit: parseNumeric(summary.totalPaid),
-      already_given: parseNumeric(summary.recurringAmount),
-      remaining_credits: parseNumeric(summary.availableCredit)
-    })
-    .eq('id', customerId);
-
-  assertNoSupabaseError(error, 'Unable to persist customer financial summary');
-  return summary;
-};
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
 
 const mapPayloadToService = (service, fallbackPayload) => {
   const activationDate =
@@ -563,9 +435,12 @@ const mapPayloadToService = (service, fallbackPayload) => {
     fallbackPayload.startDate ||
     fallbackPayload.paymentDate ||
     new Date().toISOString().slice(0, 10);
-  const durationMonths = Number(
+  const parsedMonths = Number(
     service.durationMonths || service.duration || fallbackPayload.serviceDuration || 12
   );
+  const durationMonths = Number.isFinite(parsedMonths) && parsedMonths > 0
+    ? Math.min(Math.round(parsedMonths), 36)
+    : 12;
 
   return {
     planCode: String(
@@ -580,6 +455,7 @@ const mapPayloadToService = (service, fallbackPayload) => {
     category: String(service.category || '').trim(),
     sku: String(service.sku || '').trim(),
     amount: parseNumeric(service.amount ?? fallbackPayload.amount),
+    currency: String(service.currency || fallbackPayload.currency || defaultCurrency).toUpperCase(),
     paymentMode: normalizePaymentMode(service.paymentMode || fallbackPayload.paymentMode),
     activationDate,
     expiryDate: buildExpiryDate(
@@ -587,7 +463,10 @@ const mapPayloadToService = (service, fallbackPayload) => {
       service.expiryDate || fallbackPayload.expiryDate,
       durationMonths
     ),
-    durationDays: getDurationDays(durationMonths),
+    // Months, not months * 30. The old code stored 360 days for a 12-month
+    // plan while subscription creation used calendar arithmetic, so every
+    // renewal came out five days short of the year that was paid for.
+    durationMonths,
     maxConnections: Number(service.maxConnections) > 0 ? Number(service.maxConnections) : 1,
     status: mapSubscriptionStatus(
       service.status || (fallbackPayload.status === 'inactive' ? 'expired' : fallbackPayload.status)
@@ -608,7 +487,8 @@ const mapPayloadToService = (service, fallbackPayload) => {
       sku: String(service.sku || '').trim() || null,
       features: Array.isArray(service.features) ? service.features.filter(Boolean) : [],
       templateId: String(service.templateId || service.planCode || '').trim() || null,
-      maxConnections: Number(service.maxConnections) > 0 ? Number(service.maxConnections) : 1
+      maxConnections: Number(service.maxConnections) > 0 ? Number(service.maxConnections) : 1,
+      durationMonths
     }
   };
 };
@@ -629,38 +509,26 @@ const buildServicePayloads = (payload) => {
   ];
 };
 
-const ensureSubscriptionPlan = async (service) => {
-  const supabase = getSupabaseServiceClient();
-  const row = {
-    plan_code: service.planCode || null,
-    name: service.name || 'Primary IPTV Service',
-    price: service.amount,
-    duration_days: service.durationDays,
-    max_connections: service.maxConnections,
-    description: service.description || null,
-    is_active: true
-  };
-
-  if (row.plan_code) {
-    const { data, error } = await supabase
-      .from('subscription_plans')
-      .upsert(row, { onConflict: 'plan_code' })
-      .select('*')
-      .single();
-
-    assertNoSupabaseError(error, 'Unable to save subscription plan');
-    return data;
-  }
-
-  const { data, error } = await supabase
-    .from('subscription_plans')
-    .insert(row)
-    .select('*')
-    .single();
-
-  assertNoSupabaseError(error, 'Unable to create subscription plan');
-  return data;
-};
+const buildSubscriptionRow = (customerId, service, planId) => ({
+  customer_id: customerId,
+  plan_id: planId,
+  activation_date: service.activationDate,
+  expiry_date: service.expiryDate,
+  status: service.status,
+  discount: service.discount,
+  auto_renew: service.autoRenew,
+  service_label: service.serviceLabel || service.name,
+  service_code: service.serviceCode || service.planCode || null,
+  transaction_id: service.transactionId,
+  payment_mode: service.paymentMode,
+  amount: service.amount,
+  currency: service.currency,
+  device_box: service.deviceBox,
+  device_mac: service.deviceMac,
+  portal_url: service.portalUrl,
+  billing_url: service.billingUrl,
+  metadata: service.metadata
+});
 
 const createSubscriptionsForCustomer = async (customerId, payload) => {
   const supabase = getSupabaseServiceClient();
@@ -668,27 +536,8 @@ const createSubscriptionsForCustomer = async (customerId, payload) => {
   const rows = [];
 
   for (const service of services) {
-    const plan = await ensureSubscriptionPlan(service);
-
-    rows.push({
-      customer_id: customerId,
-      plan_id: plan.id,
-      activation_date: service.activationDate,
-      expiry_date: service.expiryDate,
-      status: service.status,
-      discount: service.discount,
-      auto_renew: service.autoRenew,
-      service_label: service.serviceLabel || service.name,
-      service_code: service.serviceCode || service.planCode || null,
-      transaction_id: service.transactionId,
-      payment_mode: service.paymentMode,
-      amount: service.amount,
-      device_box: service.deviceBox,
-      device_mac: service.deviceMac,
-      portal_url: service.portalUrl,
-      billing_url: service.billingUrl,
-      metadata: service.metadata
-    });
+    const plan = await resolveSubscriptionPlan(service);
+    rows.push(buildSubscriptionRow(customerId, service, plan.id));
   }
 
   const { error } = await supabase.from('customer_subscriptions').insert(rows);
@@ -698,26 +547,8 @@ const createSubscriptionsForCustomer = async (customerId, payload) => {
 const saveServiceSubscription = async (customerId, service, existingSubscriptionId = null) => {
   const supabase = getSupabaseServiceClient();
   const normalizedService = mapPayloadToService(service, service);
-  const plan = await ensureSubscriptionPlan(normalizedService);
-  const row = {
-    customer_id: customerId,
-    plan_id: plan.id,
-    activation_date: normalizedService.activationDate,
-    expiry_date: normalizedService.expiryDate,
-    status: normalizedService.status,
-    discount: normalizedService.discount,
-    auto_renew: normalizedService.autoRenew,
-    service_label: normalizedService.serviceLabel || normalizedService.name,
-    service_code: normalizedService.serviceCode || normalizedService.planCode || null,
-    transaction_id: normalizedService.transactionId,
-    payment_mode: normalizedService.paymentMode,
-    amount: normalizedService.amount,
-    device_box: normalizedService.deviceBox,
-    device_mac: normalizedService.deviceMac,
-    portal_url: normalizedService.portalUrl,
-    billing_url: normalizedService.billingUrl,
-    metadata: normalizedService.metadata
-  };
+  const plan = await resolveSubscriptionPlan(normalizedService);
+  const row = buildSubscriptionRow(customerId, normalizedService, plan.id);
 
   if (existingSubscriptionId) {
     const { error } = await supabase
@@ -738,6 +569,56 @@ const saveServiceSubscription = async (customerId, service, existingSubscription
 
   assertNoSupabaseError(error, 'Unable to add customer service');
   return data.id;
+};
+
+// Fields on the flat customer record that mirror the primary subscription.
+// Touching any of them is what makes a customer update a subscription update;
+// changing a name or an address is not.
+const SUBSCRIPTION_MIRRORED_FIELDS = [
+  'amount',
+  'expiryDate',
+  'startDate',
+  'paymentMode',
+  'paymentDate',
+  'mac',
+  'box',
+  'serviceDuration',
+  'serviceId',
+  'transactionId',
+  'services',
+  'status',
+  'role'
+];
+
+const touchesSubscription = (updates) =>
+  SUBSCRIPTION_MIRRORED_FIELDS.some((field) =>
+    Object.prototype.hasOwnProperty.call(updates, field)
+  );
+
+const syncPrimarySubscription = async (customer) => {
+  const supabase = getSupabaseServiceClient();
+  const { data: existing, error } = await supabase
+    .from('customer_subscriptions')
+    .select('id')
+    .eq('customer_id', customer.id)
+    .order('activation_date', { ascending: false })
+    .limit(1);
+
+  assertNoSupabaseError(error, 'Unable to load the primary subscription');
+
+  if (!existing || existing.length === 0) {
+    await createSubscriptionsForCustomer(customer.id, customer);
+    return;
+  }
+
+  const primaryService = buildServicePayloads(customer)[0];
+  const plan = await resolveSubscriptionPlan(primaryService);
+  const { error: updateError } = await supabase
+    .from('customer_subscriptions')
+    .update(buildSubscriptionRow(customer.id, primaryService, plan.id))
+    .eq('id', existing[0].id);
+
+  assertNoSupabaseError(updateError, 'Unable to update primary customer subscription');
 };
 
 const syncCustomerSnapshotFromService = async (customerId, service) => {
@@ -762,196 +643,199 @@ const syncCustomerSnapshotFromService = async (customerId, service) => {
   assertNoSupabaseError(error, 'Unable to sync customer summary from service');
 };
 
-const syncPrimarySubscription = async (customer) => {
-  const supabase = getSupabaseServiceClient();
-  const subscriptions = await getSubscriptionsByCustomerId(customer.id);
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
 
-  if (subscriptions.length === 0) {
-    await createSubscriptionsForCustomer(customer.id, customer);
-    return;
-  }
+// PostgREST treats , . : ( ) as syntax inside an `or` filter, so a search for
+// "a,b" would be parsed as two conditions. Strip them rather than escaping:
+// none of them are meaningful in a name, an email or a device identifier.
+const sanitizeSearchTerm = (term) =>
+  String(term || '')
+    .replace(/[,().:*%\\]/g, ' ')
+    .trim()
+    .slice(0, 120);
 
-  const primaryService = buildServicePayloads(customer)[0];
-  const plan = await ensureSubscriptionPlan(primaryService);
-
-  const { error } = await supabase
-    .from('customer_subscriptions')
-    .update({
-      plan_id: plan.id,
-      activation_date: primaryService.activationDate,
-      expiry_date: primaryService.expiryDate,
-      status: primaryService.status,
-      discount: primaryService.discount,
-      auto_renew: primaryService.autoRenew,
-      service_label: primaryService.serviceLabel || primaryService.name,
-      service_code: primaryService.serviceCode || primaryService.planCode || null,
-      transaction_id: primaryService.transactionId,
-      payment_mode: primaryService.paymentMode,
-      amount: primaryService.amount,
-      device_box: primaryService.deviceBox,
-      device_mac: primaryService.deviceMac,
-      portal_url: primaryService.portalUrl,
-      billing_url: primaryService.billingUrl,
-      metadata: primaryService.metadata
-    })
-    .eq('id', subscriptions[0].id);
-
-  assertNoSupabaseError(error, 'Unable to update primary customer subscription');
-};
-
-const sampleCustomers = () => [
-  {
-    name: 'John Doe',
-    email: 'john@example.com',
-    phone: '+1234567890',
-    address: '123 Main St, New York, NY',
-    status: 'active',
-    avatar: '/images/user/user-02.png',
-    role: 'Premium Customer',
-    mac: 'AA:BB:CC:DD:EE:FF',
-    box: 'BOX001',
-    startDate: '2024-01-15',
-    paymentDate: '2024-01-15',
-    paymentMode: 'Credit Card',
-    amount: '99.99',
-    expiryDate: '2024-12-15',
-    totalCredit: '500.00',
-    alreadyGiven: '100.00',
-    remainingCredits: '400.00',
-    note: 'VIP Customer',
-    serviceDuration: '12'
-  },
-  {
-    name: 'Jane Smith',
-    email: 'jane@example.com',
-    phone: '+1234567891',
-    address: '456 Oak Ave, Los Angeles, CA',
-    status: 'inactive',
-    avatar: '/images/user/user-03.png',
-    role: 'Standard Customer',
-    mac: 'BB:CC:DD:EE:FF:AA',
-    box: 'BOX002',
-    startDate: '2024-02-01',
-    paymentDate: '2024-02-01',
-    paymentMode: 'PayPal',
-    amount: '79.99',
-    expiryDate: '2024-11-01',
-    totalCredit: '300.00',
-    alreadyGiven: '50.00',
-    remainingCredits: '250.00',
-    note: 'Regular Customer',
-    serviceDuration: '12'
-  },
-  {
-    name: 'Bob Johnson',
-    email: 'bob@example.com',
-    phone: '+1234567892',
-    address: '789 Pine St, Chicago, IL',
-    status: 'active',
-    avatar: '/images/user/user-04.png',
-    role: 'Basic Customer',
-    mac: 'CC:DD:EE:FF:AA:BB',
-    box: 'BOX003',
-    startDate: '2024-03-01',
-    paymentDate: '2024-03-01',
-    paymentMode: 'Bank Transfer',
-    amount: '129.99',
-    expiryDate: '2025-02-01',
-    totalCredit: '800.00',
-    alreadyGiven: '200.00',
-    remainingCredits: '600.00',
-    note: 'Premium Customer',
-    serviceDuration: '12'
-  }
+const SEARCHABLE_COLUMNS = [
+  'name',
+  'email',
+  'phone',
+  'whatsapp_number',
+  'customer_code',
+  'service_id',
+  'transaction_id',
+  'mac',
+  'box',
+  'city'
 ];
 
-const ensureSampleCustomers = async () => {
+const SORTABLE_COLUMNS = new Set([
+  'created_at',
+  'name',
+  'email',
+  'status',
+  'expiry_date',
+  'amount'
+]);
+
+// The previous implementation fetched every customer and then issued two more
+// queries per customer -- 1 + 2N round trips -- while the frontend did all
+// filtering, sorting and pagination in the browser. Every screen therefore
+// downloaded the entire book of business. This is two queries for a page:
+// one for the rows with their subscriptions embedded, one for the financials
+// of just those rows.
+const list = async ({
+  search = '',
+  status = '',
+  page = 1,
+  pageSize = 25,
+  sortBy = 'created_at',
+  sortDirection = 'desc',
+  expiringWithinDays = null,
+  deleted = false
+} = {}) => {
   const supabase = getSupabaseServiceClient();
-  const { data, error } = await supabase.from('customers').select('id').limit(1);
+  const safePageSize = Math.min(Math.max(Number(pageSize) || 25, 1), 200);
+  const safePage = Math.max(Number(page) || 1, 1);
+  const from = (safePage - 1) * safePageSize;
+  const column = SORTABLE_COLUMNS.has(sortBy) ? sortBy : 'created_at';
 
-  assertNoSupabaseError(error, 'Unable to check existing customers');
+  let query = supabase
+    .from('customers')
+    .select(`*, customer_subscriptions (${SUBSCRIPTION_SELECT})`, { count: 'exact' });
 
-  if (Array.isArray(data) && data.length > 0) {
-    return getAll();
+  query = deleted ? query.not('deleted_at', 'is', null) : query.is('deleted_at', null);
+
+  const term = sanitizeSearchTerm(search);
+
+  if (term) {
+    query = query.or(SEARCHABLE_COLUMNS.map((field) => `${field}.ilike.%${term}%`).join(','));
   }
 
-  const preparedCustomers = await Promise.all(
-    sampleCustomers().map(async (customer) => ({
-      ...mapPayloadToRow(customer),
-      portal_password_hash: await bcrypt.hash(generatePortalPassword(), 12),
-      portal_access_enabled: true,
-      portal_reset_required: true
-    }))
-  );
+  if (status && status !== 'all') {
+    query = query.eq('status', status);
+  }
 
-  const { error: insertError } = await supabase
-    .from('customers')
-    .insert(preparedCustomers);
+  if (Number.isInteger(Number(expiringWithinDays))) {
+    const horizon = new Date();
+    horizon.setDate(horizon.getDate() + Number(expiringWithinDays));
+    query = query.lte('expiry_date', horizon.toISOString().slice(0, 10));
+  }
 
-  assertNoSupabaseError(insertError, 'Unable to seed sample customers');
-  return getAll();
-};
-
-const getAll = async () => {
-  const supabase = getSupabaseServiceClient();
-  const { data, error } = await supabase
-    .from('customers')
-    .select('*')
-    .order('created_at', { ascending: false });
+  const { data, error, count } = await query
+    .order(column, { ascending: String(sortDirection).toLowerCase() === 'asc' })
+    .range(from, from + safePageSize - 1);
 
   assertNoSupabaseError(error, 'Unable to fetch customers');
-  return Promise.all(
-    (data || []).map(async (row) => {
-      const [subscriptions, payments] = await Promise.all([
-        getSubscriptionsByCustomerId(row.id),
-        getPaymentsByCustomerId(row.id)
-      ]);
 
-      return mapRowToCustomer(row, subscriptions, payments);
-    })
-  );
+  const rows = data || [];
+  const financials = await getFinancialsFor(rows.map((row) => row.id));
+
+  return {
+    customers: rows.map((row) =>
+      mapRowToCustomer(
+        row,
+        (row.customer_subscriptions || []).map(mapRowToSubscription).filter(Boolean),
+        [],
+        financials.get(row.id)
+      )
+    ),
+    pagination: {
+      page: safePage,
+      pageSize: safePageSize,
+      total: count ?? rows.length,
+      totalPages: Math.max(Math.ceil((count ?? rows.length) / safePageSize), 1)
+    }
+  };
 };
 
-const getById = async (id) => {
+// Kept for callers that genuinely need every record -- the CSV export and the
+// scheduler. Pages through `list` rather than reintroducing an unbounded query.
+const getAll = async (filters = {}) => {
+  const collected = [];
+  let page = 1;
+
+  for (;;) {
+    const { customers, pagination } = await list({ ...filters, page, pageSize: 200 });
+    collected.push(...customers);
+
+    if (page >= pagination.totalPages || customers.length === 0) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return collected;
+};
+
+const fetchCustomerRow = async (id, { includeDeleted = false } = {}) => {
   const supabase = getSupabaseServiceClient();
-  const { data, error } = await supabase.from('customers').select('*').eq('id', id).maybeSingle();
+  let query = supabase
+    .from('customers')
+    .select(
+      `*, customer_subscriptions (${SUBSCRIPTION_SELECT}), payments (${PAYMENT_SELECT})`
+    )
+    .eq('id', id);
 
+  if (!includeDeleted) {
+    query = query.is('deleted_at', null);
+  }
+
+  const { data, error } = await query.maybeSingle();
   assertNoSupabaseError(error, 'Unable to fetch customer');
+  return data;
+};
 
-  if (!data) {
+const hydrateCustomer = async (row) => {
+  if (!row) {
     return null;
   }
 
-  const [subscriptions, payments] = await Promise.all([
-    getSubscriptionsByCustomerId(id),
-    getPaymentsByCustomerId(id)
-  ]);
-  return mapRowToCustomer(data, subscriptions, payments);
+  const financials = await getFinancialsFor([row.id]);
+  const subscriptions = (row.customer_subscriptions || [])
+    .map(mapRowToSubscription)
+    .filter(Boolean)
+    .sort((left, right) => String(right.activationDate).localeCompare(String(left.activationDate)));
+  const payments = (row.payments || [])
+    .map(mapRowToPayment)
+    .filter(Boolean)
+    .sort((left, right) => String(right.paymentDate).localeCompare(String(left.paymentDate)));
+
+  return mapRowToCustomer(row, subscriptions, payments, financials.get(row.id));
 };
+
+const getById = async (id) => hydrateCustomer(await fetchCustomerRow(id));
 
 const findByEmail = async (email) => {
   const supabase = getSupabaseServiceClient();
   const { data, error } = await supabase
     .from('customers')
-    .select('*')
+    .select('id, email')
     .eq('email', String(email).trim().toLowerCase())
+    .is('deleted_at', null)
     .maybeSingle();
 
   assertNoSupabaseError(error, 'Unable to find customer by email');
-  return mapRowToCustomer(data, []);
+  return data ? { id: data.id, email: data.email } : null;
 };
 
 const findByPhone = async (phone) => {
   const supabase = getSupabaseServiceClient();
   const { data, error } = await supabase
     .from('customers')
-    .select('*')
+    .select('id, phone')
     .eq('phone', normalizePhoneNumber(phone))
+    .is('deleted_at', null)
     .maybeSingle();
 
   assertNoSupabaseError(error, 'Unable to find customer by phone');
-  return mapRowToCustomer(data, []);
+  return data ? { id: data.id, phone: data.phone } : null;
 };
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
 
 const create = async (payload) => {
   const supabase = getSupabaseServiceClient();
@@ -978,26 +862,40 @@ const create = async (payload) => {
       ...mapPayloadToRow(preparedPayload),
       portal_password_hash: await bcrypt.hash(temporaryPortalPassword, 12),
       portal_access_enabled: preparedPayload.portalAccessEnabled,
-      portal_reset_required: preparedPayload.portalResetRequired
+      portal_reset_required: preparedPayload.portalResetRequired,
+      portal_password_expires_at: new Date(
+        Date.now() + portalPasswordTtlHours * 60 * 60 * 1000
+      ).toISOString()
     })
-    .select('*')
+    .select('id')
     .single();
 
   try {
     assertNoSupabaseError(error, 'Unable to create customer');
     await createSubscriptionsForCustomer(data.id, preparedPayload);
-    await persistFinancialSnapshot(data.id);
     const customer = await getById(data.id);
+
     return {
       ...customer,
       portalSetup: {
         temporaryPassword: temporaryPortalPassword,
-        resetRequired: true
+        resetRequired: true,
+        expiresInHours: portalPasswordTtlHours
       }
     };
   } catch (creationError) {
+    // The customer row landed but its subscriptions did not. Roll it back so a
+    // half-created account does not sit in the directory. A hard delete is
+    // correct here specifically because nothing can have been billed yet.
     if (data?.id) {
-      await supabase.from('customers').delete().eq('id', data.id);
+      const { error: rollbackError } = await supabase.from('customers').delete().eq('id', data.id);
+
+      if (rollbackError) {
+        logger.error('Failed to roll back a partially created customer', {
+          customerId: data.id,
+          error: rollbackError
+        });
+      }
     }
 
     throw creationError;
@@ -1006,10 +904,17 @@ const create = async (payload) => {
 
 const update = async (id, updates) => {
   const supabase = getSupabaseServiceClient();
+  const row = mapPayloadToRow(updates);
+
+  if (Object.keys(row).length === 0) {
+    return getById(id);
+  }
+
   const { data, error } = await supabase
     .from('customers')
-    .update(mapPayloadToRow(updates))
+    .update(row)
     .eq('id', id)
+    .is('deleted_at', null)
     .select('*')
     .maybeSingle();
 
@@ -1019,44 +924,97 @@ const update = async (id, updates) => {
     return null;
   }
 
-  await syncPrimarySubscription(mapRowToCustomer(data, []));
+  // Only rebuild the primary subscription when the edit actually touched a
+  // field the subscription mirrors. This used to run on every update, so
+  // correcting a customer's address rewrote their billing amount and
+  // recomputed their expiry date from a service_duration that defaulted to 12.
+  if (touchesSubscription(updates)) {
+    await syncPrimarySubscription(mapRowToCustomer(data, []));
+  }
+
   return getById(id);
 };
+
+// Soft delete. The previous hard delete cascaded through payments, so removing
+// a customer destroyed the record of money they had paid -- irreversibly, and
+// including figures that had already been reported on.
+const remove = async (id) => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase
+    .from('customers')
+    .update({
+      deleted_at: new Date().toISOString(),
+      portal_access_enabled: false
+    })
+    .eq('id', id)
+    .is('deleted_at', null)
+    .select('id')
+    .maybeSingle();
+
+  assertNoSupabaseError(error, 'Unable to delete customer');
+  return Boolean(data);
+};
+
+const restore = async (id) => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase
+    .from('customers')
+    .update({ deleted_at: null })
+    .eq('id', id)
+    .not('deleted_at', 'is', null)
+    .select('id')
+    .maybeSingle();
+
+  assertNoSupabaseError(error, 'Unable to restore customer');
+  return Boolean(data);
+};
+
+// ---------------------------------------------------------------------------
+// Portal
+// ---------------------------------------------------------------------------
 
 const getPortalCustomerById = async (id) => {
   const supabase = getSupabaseServiceClient();
   const { data, error } = await supabase
     .from('customers')
-    .select('*')
+    .select(`*, customer_subscriptions (${SUBSCRIPTION_SELECT}), payments (${PAYMENT_SELECT})`)
     .eq('id', id)
     .eq('portal_access_enabled', true)
+    .is('deleted_at', null)
     .maybeSingle();
 
   assertNoSupabaseError(error, 'Unable to fetch portal customer');
+  return hydrateCustomer(data);
+};
 
-  if (!data) {
-    return null;
-  }
+const getPortalAuthRow = async (id) => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase
+    .from('customers')
+    .select('id, token_version, portal_access_enabled, deleted_at')
+    .eq('id', id)
+    .maybeSingle();
 
-  const [subscriptions, payments] = await Promise.all([
-    getSubscriptionsByCustomerId(id),
-    getPaymentsByCustomerId(id)
-  ]);
-  return mapRowToCustomer(data, subscriptions, payments);
+  assertNoSupabaseError(error, 'Unable to fetch portal customer credentials');
+  return data;
 };
 
 const authenticatePortalCustomer = async (email, password) => {
   const supabase = getSupabaseServiceClient();
   const { data, error } = await supabase
     .from('customers')
-    .select('*')
+    .select('id, portal_password_hash, portal_password_expires_at, portal_reset_required')
     .eq('email', String(email).trim().toLowerCase())
     .eq('portal_access_enabled', true)
+    .is('deleted_at', null)
     .maybeSingle();
 
   assertNoSupabaseError(error, 'Unable to fetch customer portal account');
 
   if (!data?.portal_password_hash) {
+    // Hash anyway so a missing account and a wrong password take the same time
+    // and cannot be told apart by timing the response.
+    await bcrypt.compare(password, '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
     return null;
   }
 
@@ -1066,6 +1024,17 @@ const authenticatePortalCustomer = async (email, password) => {
     return null;
   }
 
+  // A temporary password that was issued and never used stops being a standing
+  // credential. An expiry only applies while a reset is still outstanding --
+  // once the customer chooses their own password it is cleared.
+  if (
+    data.portal_reset_required &&
+    data.portal_password_expires_at &&
+    new Date(data.portal_password_expires_at).getTime() < Date.now()
+  ) {
+    return { expired: true };
+  }
+
   const now = new Date().toISOString();
   const { error: updateError } = await supabase
     .from('customers')
@@ -1073,25 +1042,16 @@ const authenticatePortalCustomer = async (email, password) => {
     .eq('id', data.id);
 
   assertNoSupabaseError(updateError, 'Unable to update customer portal last login');
-
-  const subscriptions = await getSubscriptionsByCustomerId(data.id);
-  const payments = await getPaymentsByCustomerId(data.id);
-  return mapRowToCustomer(
-    {
-      ...data,
-      portal_last_login: now
-    },
-    subscriptions,
-    payments
-  );
+  return getPortalCustomerById(data.id);
 };
 
 const changePortalPassword = async (customerId, currentPassword, newPassword) => {
   const supabase = getSupabaseServiceClient();
   const { data, error } = await supabase
     .from('customers')
-    .select('*')
+    .select('id, portal_password_hash, token_version')
     .eq('id', customerId)
+    .is('deleted_at', null)
     .maybeSingle();
 
   assertNoSupabaseError(error, 'Unable to fetch customer for password change');
@@ -1110,23 +1070,43 @@ const changePortalPassword = async (customerId, currentPassword, newPassword) =>
     .from('customers')
     .update({
       portal_password_hash: await bcrypt.hash(newPassword, 12),
-      portal_reset_required: false
+      portal_reset_required: false,
+      portal_password_expires_at: null,
+      // Every session opened with the old password stops working. A password
+      // change that leaves old tokens valid is not a password change.
+      token_version: Number(data.token_version || 0) + 1
     })
     .eq('id', customerId);
 
   assertNoSupabaseError(updateError, 'Unable to update customer portal password');
-  return { success: true };
+  return { success: true, tokenVersion: Number(data.token_version || 0) + 1 };
 };
 
 const resetPortalPassword = async (customerId) => {
   const supabase = getSupabaseServiceClient();
   const temporaryPassword = generatePortalPassword();
+  const { data: current, error: currentError } = await supabase
+    .from('customers')
+    .select('token_version')
+    .eq('id', customerId)
+    .is('deleted_at', null)
+    .maybeSingle();
+
+  assertNoSupabaseError(currentError, 'Unable to read customer before password reset');
+
+  if (!current) {
+    return null;
+  }
+
+  const expiresAt = new Date(Date.now() + portalPasswordTtlHours * 60 * 60 * 1000).toISOString();
   const { data, error } = await supabase
     .from('customers')
     .update({
       portal_password_hash: await bcrypt.hash(temporaryPassword, 12),
       portal_access_enabled: true,
-      portal_reset_required: true
+      portal_reset_required: true,
+      portal_password_expires_at: expiresAt,
+      token_version: Number(current.token_version || 0) + 1
     })
     .eq('id', customerId)
     .select('*')
@@ -1140,14 +1120,49 @@ const resetPortalPassword = async (customerId) => {
 
   return {
     customer: mapRowToCustomer(data, []),
-    temporaryPassword
+    temporaryPassword,
+    expiresAt,
+    expiresInHours: portalPasswordTtlHours
   };
 };
 
+const setPortalAccess = async (customerId, enabled) => {
+  const supabase = getSupabaseServiceClient();
+  const { data: current, error: currentError } = await supabase
+    .from('customers')
+    .select('token_version')
+    .eq('id', customerId)
+    .is('deleted_at', null)
+    .maybeSingle();
+
+  assertNoSupabaseError(currentError, 'Unable to read customer before changing portal access');
+
+  if (!current) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('customers')
+    .update({
+      portal_access_enabled: Boolean(enabled),
+      // Revoking access has to invalidate the session that is already open,
+      // not just prevent the next sign-in.
+      token_version: enabled ? current.token_version : Number(current.token_version || 0) + 1
+    })
+    .eq('id', customerId)
+    .select('id')
+    .maybeSingle();
+
+  assertNoSupabaseError(error, 'Unable to change portal access');
+  return Boolean(data);
+};
+
+// ---------------------------------------------------------------------------
+// Services and payments
+// ---------------------------------------------------------------------------
+
 const addServiceSubscription = async (customerId, service) => {
   await saveServiceSubscription(customerId, service);
-  await persistFinancialSnapshot(customerId);
-
   return getById(customerId);
 };
 
@@ -1180,11 +1195,29 @@ const updateServiceSubscription = async (customerId, subscriptionId, service) =>
     await syncCustomerSnapshotFromService(customerId, service);
   }
 
-  await persistFinancialSnapshot(customerId);
-
   return getById(customerId);
 };
 
+const removeServiceSubscription = async (customerId, subscriptionId) => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase
+    .from('customer_subscriptions')
+    .update({ status: 'cancelled', auto_renew: false })
+    .eq('id', subscriptionId)
+    .eq('customer_id', customerId)
+    .select('id')
+    .maybeSingle();
+
+  assertNoSupabaseError(error, 'Unable to cancel customer service');
+  return Boolean(data);
+};
+
+// The whole of this used to be five-plus sequential writes with no
+// transaction: it extended each subscription's expiry date, THEN inserted the
+// payment rows, THEN updated the customer. A failure in between renewed a
+// service without recording that anyone paid for it. It is now one call to a
+// Postgres function, which runs in a single transaction and either does all of
+// it or none of it.
 const recordCustomerPayment = async (customerId, payload) => {
   const supabase = getSupabaseServiceClient();
   const subscriptionIds = Array.isArray(payload.subscriptionIds)
@@ -1195,33 +1228,6 @@ const recordCustomerPayment = async (customerId, payload) => {
     throw new Error('Choose at least one service for this payment.');
   }
 
-  const { data: subscriptions, error: subscriptionsError } = await supabase
-    .from('customer_subscriptions')
-    .select(`
-      id,
-      customer_id,
-      expiry_date,
-      status,
-      amount,
-      service_label,
-      subscription_plans (
-        duration_days
-      )
-    `)
-    .eq('customer_id', customerId)
-    .in('id', subscriptionIds);
-
-  assertNoSupabaseError(subscriptionsError, 'Unable to fetch services for payment');
-
-  if (!Array.isArray(subscriptions) || subscriptions.length !== subscriptionIds.length) {
-    throw new Error('One or more selected services could not be found for this customer.');
-  }
-
-  const selectedTotal = subscriptions.reduce((sum, subscription) => sum + parseNumeric(subscription.amount), 0);
-  const submittedAmount = parseNumeric(payload.amount);
-  const paymentAmount = submittedAmount > 0 ? submittedAmount : selectedTotal;
-  const paymentMode = normalizePaymentMode(payload.paymentMode);
-  const transactionId = String(payload.transactionId || generateTransactionId()).trim();
   const paymentDateValue = payload.paymentDate || new Date().toISOString();
   const paymentDate = new Date(paymentDateValue);
 
@@ -1229,130 +1235,247 @@ const recordCustomerPayment = async (customerId, payload) => {
     throw new Error('Payment date is invalid.');
   }
 
-  const paymentDateIso = paymentDate.toISOString();
-  let remainingAllocation = paymentAmount;
-  const paymentRows = [];
+  let amount = parseNumeric(payload.amount);
 
-  for (const subscription of subscriptions) {
-    const serviceAmount = parseNumeric(subscription.amount);
-    const allocatedAmount = Math.min(remainingAllocation, serviceAmount);
-    const isFullyPaid = allocatedAmount >= serviceAmount;
-    const durationDays =
-      Number(
-        Array.isArray(subscription.subscription_plans)
-          ? subscription.subscription_plans[0]?.duration_days
-          : subscription.subscription_plans?.duration_days
-      ) || 30;
+  // No amount supplied means "settle everything selected", which is what the
+  // record-payment dialog defaults to. Work out what is actually outstanding
+  // rather than charging the full price of an already part-paid cycle again.
+  if (amount <= 0) {
+    const { data: selected, error: selectedError } = await supabase
+      .from('customer_subscriptions')
+      .select('amount, discount, cycle_paid_amount')
+      .eq('customer_id', customerId)
+      .in('id', subscriptionIds);
 
-    let nextDueDate = null;
+    assertNoSupabaseError(selectedError, 'Unable to total the selected services');
 
-    if (isFullyPaid) {
-      const currentExpiry = subscription.expiry_date || new Date().toISOString().slice(0, 10);
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const baseDate = currentExpiry >= todayIso ? currentExpiry : todayIso;
-      nextDueDate = addDays(baseDate, durationDays);
-
-      const { error: updateError } = await supabase
-        .from('customer_subscriptions')
-        .update({
-          status: 'active',
-          expiry_date: nextDueDate
-        })
-        .eq('id', subscription.id)
-        .eq('customer_id', customerId);
-
-      assertNoSupabaseError(updateError, 'Unable to renew the selected service');
-    }
-
-    paymentRows.push({
-      customer_id: customerId,
-      subscription_id: subscription.id,
-      amount: allocatedAmount,
-      discount: 0,
-      tax: 0,
-      payment_mode: paymentMode,
-      transaction_id: transactionId,
-      status: isFullyPaid ? 'paid' : 'pending',
-      payment_date: paymentDateIso,
-      next_due_date: nextDueDate
-    });
-
-    remainingAllocation = Math.max(remainingAllocation - allocatedAmount, 0);
+    amount = (selected || []).reduce((sum, subscription) => {
+      const net = Math.max(parseNumeric(subscription.amount) - parseNumeric(subscription.discount), 0);
+      return sum + Math.max(net - parseNumeric(subscription.cycle_paid_amount), 0);
+    }, 0);
   }
 
-  if (remainingAllocation > 0) {
-    paymentRows.push({
-      customer_id: customerId,
-      subscription_id: null,
-      amount: remainingAllocation,
-      discount: 0,
-      tax: 0,
-      payment_mode: paymentMode,
-      transaction_id: transactionId,
-      status: 'paid',
-      payment_date: paymentDateIso,
-      next_due_date: null
-    });
+  if (amount <= 0) {
+    throw new Error('There is nothing outstanding on the selected services.');
   }
 
-  const { error: paymentInsertError } = await supabase.from('payments').insert(paymentRows);
-  assertNoSupabaseError(paymentInsertError, 'Unable to save customer payment');
+  const { error } = await supabase.rpc('record_customer_payment', {
+    p_customer_id: customerId,
+    p_subscription_ids: subscriptionIds,
+    p_amount: amount,
+    p_payment_mode: normalizePaymentMode(payload.paymentMode),
+    p_transaction_id: String(payload.transactionId || generateTransactionId()).trim(),
+    p_payment_date: paymentDate.toISOString(),
+    p_discount: parseNumeric(payload.discount),
+    p_tax: parseNumeric(payload.tax),
+    p_currency: String(payload.currency || defaultCurrency).toUpperCase(),
+    p_notes: payload.notes || null,
+    p_apply_credit: payload.applyCredit !== false
+  });
 
-  const primaryServiceId = subscriptionIds[0];
-  const { data: primarySubscription, error: primarySubscriptionError } = await supabase
-    .from('customer_subscriptions')
-    .select('service_code, expiry_date, amount')
-    .eq('id', primaryServiceId)
-    .eq('customer_id', customerId)
-    .maybeSingle();
-
-  assertNoSupabaseError(primarySubscriptionError, 'Unable to refresh primary service after payment');
-
-  const { error: customerUpdateError } = await supabase
-    .from('customers')
-    .update({
-      payment_date: paymentDateIso,
-      payment_mode: paymentMode,
-      transaction_id: transactionId,
-      amount: selectedTotal,
-      expiry_date: primarySubscription?.expiry_date || null,
-      service_id: primarySubscription?.service_code || null
-    })
-    .eq('id', customerId);
-
-  assertNoSupabaseError(customerUpdateError, 'Unable to refresh customer payment summary');
-  await persistFinancialSnapshot(customerId);
+  assertNoSupabaseError(error, 'Unable to record the payment');
   return getById(customerId);
 };
 
-const remove = async (id) => {
-  const existingCustomer = await getById(id);
+const refundPayment = async (customerId, paymentId, reason = '') => {
+  const supabase = getSupabaseServiceClient();
+  const { data: payment, error: lookupError } = await supabase
+    .from('payments')
+    .select('id, customer_id, status')
+    .eq('id', paymentId)
+    .eq('customer_id', customerId)
+    .maybeSingle();
 
-  if (!existingCustomer) {
-    return false;
+  assertNoSupabaseError(lookupError, 'Unable to load the payment');
+
+  if (!payment) {
+    return null;
   }
 
-  const supabase = getSupabaseServiceClient();
-  const { error } = await supabase.from('customers').delete().eq('id', id);
+  if (payment.status !== 'paid') {
+    throw new Error('Only a payment currently marked paid can be refunded.');
+  }
 
-  assertNoSupabaseError(error, 'Unable to delete customer');
-  return true;
+  const { error } = await supabase.rpc('refund_customer_payment', {
+    p_payment_id: paymentId,
+    p_reason: reason || null
+  });
+
+  assertNoSupabaseError(error, 'Unable to refund the payment');
+  return getById(customerId);
+};
+
+// ---------------------------------------------------------------------------
+// Scheduler support
+// ---------------------------------------------------------------------------
+
+const expireLapsedSubscriptions = async () => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase.rpc('expire_lapsed_subscriptions');
+
+  assertNoSupabaseError(error, 'Unable to expire lapsed subscriptions');
+  return Number(data || 0);
+};
+
+// Subscriptions expiring exactly `days` from now, skipping anyone who has
+// already been told about this expiry date and anyone who opted out of every
+// channel being used.
+const getSubscriptionsExpiringIn = async (days, { channels = ['email'], limit = 500 } = {}) => {
+  const supabase = getSupabaseServiceClient();
+  const target = new Date();
+  target.setDate(target.getDate() + Number(days));
+  const targetDate = target.toISOString().slice(0, 10);
+
+  const { data, error } = await supabase
+    .from('renewal_overview')
+    .select('*')
+    .eq('expiry_date', targetDate)
+    .eq('status', 'active')
+    .limit(limit);
+
+  assertNoSupabaseError(error, 'Unable to fetch expiring subscriptions');
+
+  const rows = (data || []).filter((row) =>
+    channels.some((channel) =>
+      channel === 'email' ? row.email_opt_in !== false : row.whatsapp_opt_in !== false
+    )
+  );
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const kind = `expiring_${days}_days`;
+  const { data: alreadySent, error: sentError } = await supabase
+    .from('subscription_reminders')
+    .select('subscription_id')
+    .eq('reminder_kind', kind)
+    .eq('expiry_date', targetDate)
+    .in('subscription_id', rows.map((row) => row.subscription_id));
+
+  assertNoSupabaseError(sentError, 'Unable to check which reminders were already sent');
+
+  const sent = new Set((alreadySent || []).map((row) => row.subscription_id));
+  return rows.filter((row) => !sent.has(row.subscription_id));
+};
+
+const markReminderSent = async ({ subscriptionId, customerId, kind, expiryDate, channels }) => {
+  const supabase = getSupabaseServiceClient();
+  const { error } = await supabase.from('subscription_reminders').insert({
+    subscription_id: subscriptionId,
+    customer_id: customerId,
+    reminder_kind: kind,
+    expiry_date: expiryDate,
+    channels
+  });
+
+  // A unique violation means a concurrent run already claimed this reminder.
+  // That is the constraint doing its job, not a failure.
+  if (error && error.code !== '23505') {
+    assertNoSupabaseError(error, 'Unable to record that a reminder was sent');
+  }
+
+  return !error;
+};
+
+// ---------------------------------------------------------------------------
+// Seeding
+// ---------------------------------------------------------------------------
+
+const sampleCustomers = () => [
+  {
+    name: 'John Doe',
+    email: 'john@example.com',
+    phone: '+12025550143',
+    address: '123 Main St, New York, NY',
+    status: 'active',
+    role: 'Premium Customer',
+    mac: 'AA:BB:CC:DD:EE:FF',
+    box: 'BOX001',
+    startDate: '2026-01-15',
+    paymentDate: '2026-01-15',
+    paymentMode: 'Credit Card',
+    amount: '99.99',
+    expiryDate: '2026-12-15',
+    note: 'VIP Customer',
+    serviceDuration: '12'
+  },
+  {
+    name: 'Jane Smith',
+    email: 'jane@example.com',
+    phone: '+12025550144',
+    address: '456 Oak Ave, Los Angeles, CA',
+    status: 'inactive',
+    role: 'Standard Customer',
+    mac: 'BB:CC:DD:EE:FF:AA',
+    box: 'BOX002',
+    startDate: '2026-02-01',
+    paymentDate: '2026-02-01',
+    paymentMode: 'PayPal',
+    amount: '79.99',
+    expiryDate: '2026-11-01',
+    note: 'Regular Customer',
+    serviceDuration: '12'
+  },
+  {
+    name: 'Bob Johnson',
+    email: 'bob@example.com',
+    phone: '+12025550145',
+    address: '789 Pine St, Chicago, IL',
+    status: 'active',
+    role: 'Basic Customer',
+    mac: 'CC:DD:EE:FF:AA:BB',
+    box: 'BOX003',
+    startDate: '2026-03-01',
+    paymentDate: '2026-03-01',
+    paymentMode: 'Bank Transfer',
+    amount: '129.99',
+    expiryDate: '2027-02-01',
+    note: 'Premium Customer',
+    serviceDuration: '12'
+  }
+];
+
+const ensureSampleCustomers = async () => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase.from('customers').select('id').limit(1);
+
+  assertNoSupabaseError(error, 'Unable to check existing customers');
+
+  if (Array.isArray(data) && data.length > 0) {
+    return (await list({ pageSize: 200 })).customers;
+  }
+
+  for (const customer of sampleCustomers()) {
+    await create(customer);
+  }
+
+  return (await list({ pageSize: 200 })).customers;
 };
 
 module.exports = {
   ensureSampleCustomers,
+  list,
   getAll,
   getById,
   getPortalCustomerById,
+  getPortalAuthRow,
   authenticatePortalCustomer,
   changePortalPassword,
   resetPortalPassword,
+  setPortalAccess,
   addServiceSubscription,
   updateServiceSubscription,
+  removeServiceSubscription,
   recordCustomerPayment,
+  refundPayment,
+  expireLapsedSubscriptions,
+  getSubscriptionsExpiringIn,
+  markReminderSent,
   findByEmail,
   findByPhone,
   create,
   update,
-  remove
+  remove,
+  restore
 };

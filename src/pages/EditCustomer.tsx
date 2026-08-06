@@ -1,11 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import {
-  calculateCustomerCredits,
-  getCustomerById,
-  type Customer,
-  updateCustomer,
-} from "../data/customersDB";
+import { getCustomerById, type Customer, updateCustomer } from "../data/customersDB";
+import { formatCurrency } from "../utils/currency";
 
 type Notice = {
   type: "success" | "error";
@@ -33,9 +29,6 @@ type CustomerFormState = Pick<
   | "paymentMode"
   | "amount"
   | "expiryDate"
-  | "totalCredit"
-  | "alreadyGiven"
-  | "remainingCredits"
   | "note"
   | "serviceDuration"
 >;
@@ -60,9 +53,6 @@ const emptyFormState: CustomerFormState = {
   paymentMode: "Cash",
   amount: "",
   expiryDate: "",
-  totalCredit: "",
-  alreadyGiven: "",
-  remainingCredits: "",
   note: "",
   serviceDuration: "12",
 };
@@ -71,9 +61,6 @@ const internationalPhonePattern = /^\+[1-9]\d{7,14}$/;
 
 const isInternationalPhoneNumber = (value: string) =>
   internationalPhonePattern.test(value.trim());
-
-const parseCurrency = (value: string) =>
-  parseFloat(String(value).replace(/[^0-9.-]/g, "")) || 0;
 
 const normalizeCurrencyInput = (value: string) =>
   value.replace(/[^0-9.]/g, "");
@@ -111,9 +98,6 @@ const buildFormState = (customer: Customer): CustomerFormState => ({
   paymentMode: customer.paymentMode || "Cash",
   amount: customer.amount || "",
   expiryDate: customer.expiryDate || "",
-  totalCredit: customer.totalCredit || "",
-  alreadyGiven: customer.alreadyGiven || "",
-  remainingCredits: customer.remainingCredits || "",
   note: customer.note || "",
   serviceDuration: customer.serviceDuration || "12",
 });
@@ -188,43 +172,11 @@ export default function EditCustomer() {
     };
   }, [id]);
 
-  useEffect(() => {
-    if (!formData.paymentDate || !formData.serviceDuration || !formData.amount) {
-      return;
-    }
-
-    const nextCredits = calculateCustomerCredits(
-      parseCurrency(formData.amount),
-      25,
-      formData.paymentDate,
-      parseInt(formData.serviceDuration, 10) || 12
-    );
-
-    if (
-      nextCredits.expiryDate === formData.expiryDate &&
-      nextCredits.totalCredit === formData.totalCredit &&
-      nextCredits.alreadyGiven === formData.alreadyGiven &&
-      nextCredits.remainingCredits === formData.remainingCredits
-    ) {
-      return;
-    }
-
-    setFormData((current) => ({
-      ...current,
-      expiryDate: nextCredits.expiryDate,
-      totalCredit: nextCredits.totalCredit,
-      alreadyGiven: nextCredits.alreadyGiven,
-      remainingCredits: nextCredits.remainingCredits,
-    }));
-  }, [
-    formData.amount,
-    formData.alreadyGiven,
-    formData.expiryDate,
-    formData.paymentDate,
-    formData.remainingCredits,
-    formData.serviceDuration,
-    formData.totalCredit,
-  ]);
+  // An effect here used to recompute the expiry date and all three balance
+  // figures on every keystroke, using a service price hardcoded to 25, and
+  // post the result. The balances are derived server side from the payments
+  // that produced them, and the expiry belongs to the subscription -- neither
+  // is the edit form's to invent.
 
   const metrics = useMemo(
     () => [
@@ -240,7 +192,7 @@ export default function EditCustomer() {
   ) => {
     const { name, value } = event.target;
 
-    if (["amount", "totalCredit", "alreadyGiven", "remainingCredits"].includes(name)) {
+    if (name === "amount") {
       setFormData((current) => ({
         ...current,
         [name]: normalizeCurrencyInput(value),
@@ -628,45 +580,33 @@ export default function EditCustomer() {
                     className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
                   />
                 </div>
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">
-                    Total credit
-                  </label>
-                  <input
-                    type="text"
-                    name="totalCredit"
-                    value={formData.totalCredit}
-                    onChange={handleInputChange}
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 outline-none"
-                    readOnly
-                  />
-                </div>
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">
-                    Already given
-                  </label>
-                  <input
-                    type="text"
-                    name="alreadyGiven"
-                    value={formData.alreadyGiven}
-                    onChange={handleInputChange}
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 outline-none"
-                    readOnly
-                  />
-                </div>
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">
-                    Remaining credits
-                  </label>
-                  <input
-                    type="text"
-                    name="remainingCredits"
-                    value={formData.remainingCredits}
-                    onChange={handleInputChange}
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 outline-none"
-                    readOnly
-                  />
-                </div>
+              </div>
+
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <p className="text-sm font-semibold text-slate-900">Account balance</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Calculated from recorded payments and active services. Record a payment to
+                  change these.
+                </p>
+                <dl className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  {(
+                    [
+                      ["Total paid", customer?.paymentSummary?.totalPaid],
+                      ["Recurring total", customer?.paymentSummary?.recurringAmount],
+                      ["Available credit", customer?.paymentSummary?.availableCredit],
+                      ["Outstanding", customer?.paymentSummary?.outstandingBalance],
+                    ] as const
+                  ).map(([label, value]) => (
+                    <div key={label}>
+                      <dt className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                        {label}
+                      </dt>
+                      <dd className="mt-1 text-lg font-semibold text-slate-900">
+                        {formatCurrency(value ?? "0", customer?.currency)}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
               </div>
             </div>
 

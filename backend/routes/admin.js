@@ -1,6 +1,11 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { protect } = require('../middleware/auth');
+const jwt = require('jsonwebtoken');
+const { protect, requireRole, ROLES } = require('../middleware/auth');
+const { assertStrongPassword, respondWithError, asyncHandler } = require('../middleware/validation');
+const { jwtSecret } = require('../config/runtime');
+const auditRepository = require('../repositories/auditRepository');
+const schedulerService = require('../services/schedulerService');
 const adminRepository = require('../repositories/adminRepository');
 
 const router = express.Router();
@@ -51,8 +56,6 @@ router.put('/profile', [
       admin: updatedAdmin
     });
   } catch (error) {
-    console.error('Update profile error:', error);
-
     if (error.code === '23505') {
       return res.status(400).json({
         success: false,
@@ -60,17 +63,14 @@ router.put('/profile', [
       });
     }
 
-    res.status(500).json({
-      success: false,
-      message: 'Server error updating profile'
-    });
+    respondWithError(res, error, { fallback: 'Server error updating profile' });
   }
 });
 
 router.put('/change-password', [
   protect,
-  body('currentPassword').isLength({ min: 6 }),
-  body('newPassword').isLength({ min: 6 })
+  body('currentPassword').isLength({ min: 1, max: 200 }),
+  body('newPassword').custom(assertStrongPassword)
 ], async (req, res) => {
   try {
     if (handleValidationErrors(req, res)) {
@@ -94,17 +94,106 @@ router.put('/change-password', [
       });
     }
 
+    await auditRepository.recordFromRequest(req, 'admin_password_changed', {
+      entityType: 'admin',
+      entityId: req.admin.id
+    });
+
+    // The change invalidated every existing token, including the one this
+    // request used. Hand back a fresh one so the admin is not signed out by
+    // their own password change.
     res.json({
       success: true,
-      message: 'Password updated successfully'
+      message: 'Password updated successfully',
+      token: jwt.sign(
+        { id: req.admin.id, kind: 'admin', tokenVersion: result.tokenVersion },
+        jwtSecret,
+        { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+      )
     });
   } catch (error) {
-    console.error('Change password error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error changing password'
-    });
+    respondWithError(res, error, { fallback: 'Server error changing password' });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Administrator management
+// ---------------------------------------------------------------------------
+
+router.get('/users', protect, requireRole(ROLES.SUPER_ADMIN), asyncHandler(async (req, res) => {
+  try {
+    res.json({ success: true, admins: await adminRepository.list() });
+  } catch (error) {
+    respondWithError(res, error, { fallback: 'Server error listing administrators' });
+  }
+}));
+
+router.put(
+  '/users/:id/status',
+  protect,
+  requireRole(ROLES.SUPER_ADMIN),
+  [body('isActive').isBoolean()],
+  asyncHandler(async (req, res) => {
+    if (handleValidationErrors(req, res)) {
+      return;
+    }
+
+    try {
+      // Locking yourself out is not recoverable through this UI.
+      if (req.params.id === req.admin.id && req.body.isActive === false) {
+        return res.status(400).json({
+          success: false,
+          message: 'You cannot deactivate your own account.'
+        });
+      }
+
+      const admin = await adminRepository.setActive(req.params.id, req.body.isActive);
+
+      if (!admin) {
+        return res.status(404).json({ success: false, message: 'Administrator not found' });
+      }
+
+      await auditRepository.recordFromRequest(req, 'admin_status_changed', {
+        entityType: 'admin',
+        entityId: req.params.id,
+        metadata: { isActive: Boolean(req.body.isActive) }
+      });
+
+      res.json({ success: true, admin });
+    } catch (error) {
+      respondWithError(res, error, { fallback: 'Server error changing administrator status' });
+    }
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Scheduler
+// ---------------------------------------------------------------------------
+
+router.get('/scheduler', protect, (req, res) => {
+  res.json({ success: true, scheduler: schedulerService.getStatus() });
+});
+
+// Manual trigger, so the expiry sweep and reminder run can be exercised
+// without waiting for the cron window or restarting on a different schedule.
+router.post(
+  '/scheduler/run',
+  protect,
+  requireRole(ROLES.ADMIN),
+  asyncHandler(async (req, res) => {
+    try {
+      const result = await schedulerService.runOnce({ trigger: `manual:${req.admin.email}` });
+
+      await auditRepository.recordFromRequest(req, 'scheduler_manual_run', {
+        entityType: 'scheduler',
+        metadata: result
+      });
+
+      res.json({ success: true, result });
+    } catch (error) {
+      respondWithError(res, error, { fallback: 'Scheduler run failed' });
+    }
+  })
+);
 
 module.exports = router;

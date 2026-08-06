@@ -1,14 +1,20 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
-const { protect, requireRole, developmentOnly } = require('../middleware/auth');
+const { protect, requireRole, developmentOnly, ROLES } = require('../middleware/auth');
+const { adminLoginLimiter } = require('../middleware/rateLimit');
 const { jwtSecret } = require('../config/runtime');
+const { assertStrongPassword, respondWithError } = require('../middleware/validation');
+const auditRepository = require('../repositories/auditRepository');
 const adminRepository = require('../repositories/adminRepository');
 
 const router = express.Router();
 
-const generateToken = (adminId) => jwt.sign(
-  { id: adminId, kind: 'admin' },
+// tokenVersion is checked on every request. Bumping the column on the admin
+// row invalidates every token already issued to them, which is what makes a
+// password change or a deactivation take effect before the token expires.
+const generateToken = (admin) => jwt.sign(
+  { id: admin.id, kind: 'admin', tokenVersion: Number(admin.tokenVersion || 0) },
   jwtSecret,
   { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
 );
@@ -28,9 +34,11 @@ const handleValidationErrors = (req, res) => {
   return false;
 };
 
-router.post('/login', [
+router.post('/login', adminLoginLimiter, [
   body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 })
+  // Deliberately not the strength rule: an existing account may predate it,
+  // and telling an attacker their guess was too short is a free oracle.
+  body('password').isLength({ min: 1, max: 200 })
 ], async (req, res) => {
   try {
     if (handleValidationErrors(req, res)) {
@@ -47,27 +55,34 @@ router.post('/login', [
       });
     }
 
+    await auditRepository.record({
+      action: 'admin_signed_in',
+      adminId: admin.id,
+      entityType: 'admin',
+      entityId: admin.id,
+      ipAddress: req.ip
+    });
+
     res.json({
       success: true,
-      token: generateToken(admin.id),
+      token: generateToken(admin),
       admin
     });
   } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during login'
-    });
+    respondWithError(res, error, { fallback: 'Server error during login' });
   }
 });
 
+// Creating an administrator is the most privileged action in the system, so
+// it takes the most privileged role. Previously any `admin` could do it, which
+// meant any admin could mint themselves a super-admin.
 router.post('/register',
   protect,
-  requireRole('admin', 'super-admin'),
+  requireRole(ROLES.SUPER_ADMIN),
   [
     body('name').isLength({ min: 2 }).trim(),
     body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 6 }),
+    body('password').custom(assertStrongPassword),
     body('role').optional().isIn(['admin', 'super-admin', 'moderator'])
   ],
   async (req, res) => {
@@ -93,17 +108,18 @@ router.post('/register',
         role: role || 'admin'
       });
 
-      res.status(201).json({
-        success: true,
-        token: generateToken(admin.id),
-        admin
+      await auditRepository.recordFromRequest(req, 'admin_created', {
+        entityType: 'admin',
+        entityId: admin.id,
+        metadata: { email: admin.email, role: admin.role }
       });
+
+      // No token is returned. The previous version signed the caller in AS the
+      // account it had just created, so creating a user silently swapped the
+      // creator's own session for the new one.
+      res.status(201).json({ success: true, admin });
     } catch (error) {
-      console.error('Registration error:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Server error during registration'
-      });
+      respondWithError(res, error, { fallback: 'Server error during registration' });
     }
   }
 );
@@ -130,11 +146,7 @@ router.post('/seed', developmentOnly, async (req, res) => {
       admin
     });
   } catch (error) {
-    console.error('Seed error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during seeding'
-    });
+    respondWithError(res, error, { fallback: 'Server error during seeding' });
   }
 });
 

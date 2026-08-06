@@ -5,16 +5,9 @@ import type {
   CustomerSubscription,
 } from "../../data/customersDB";
 
+import { formatCurrencyOrFallback as formatCurrency } from "../../utils/currency";
 const parseCurrency = (value: string | number) =>
   parseFloat(String(value ?? "").replace(/[^0-9.-]/g, "")) || 0;
-
-const formatCurrency = (value: string | number) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(typeof value === "number" ? value : parseCurrency(value));
 
 const formatDate = (value: string) => {
   if (!value) {

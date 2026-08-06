@@ -6,7 +6,7 @@ require('dotenv').config({
   path: path.resolve(__dirname, '../../.env')
 });
 
-const schemaPath = path.resolve(__dirname, '../supabase/schema.sql');
+const schemaPath = path.resolve(__dirname, '../supabase/install.sql');
 
 const run = async () => {
   if (!process.env.DATABASE_URL) {
@@ -23,7 +23,8 @@ const run = async () => {
 
   try {
     await client.query(sql);
-    console.log('Supabase schema applied successfully.');
+    console.log('Schema applied successfully from supabase/install.sql.');
+    console.log('Next: npm run seed:admin');
   } finally {
     await client.end();
   }

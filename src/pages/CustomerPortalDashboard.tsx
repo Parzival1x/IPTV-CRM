@@ -5,6 +5,7 @@ import type { CustomerSubscription } from "../data/customersDB";
 import { customerPortalAuthService } from "../services/customerPortalAuth";
 import { plansAPI, portalAPI } from "../services/api";
 
+import { formatCurrencyOrFallback as formatCurrency } from "../utils/currency";
 type PortalPlan = {
   id: string;
   planCode: string;
@@ -39,20 +40,6 @@ const formatDate = (value: string | null | undefined) => {
 
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "Not set" : parsed.toLocaleDateString();
-};
-
-const formatCurrency = (value: string) => {
-  const numeric = parseFloat(String(value || "").replace(/[^0-9.-]/g, ""));
-  if (!Number.isFinite(numeric)) {
-    return "Not set";
-  }
-
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(numeric);
 };
 
 const daysUntil = (value: string | null | undefined) => {

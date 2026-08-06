@@ -1,5 +1,6 @@
 import type { CustomerSubscription } from "../../data/customersDB";
 
+import { formatCurrencyOrFallback as formatCurrency } from "../../utils/currency";
 const safeText = (value: unknown, fallback = "Not available") => {
   const normalized = String(value ?? "").trim();
   return normalized || fallback;
@@ -12,20 +13,6 @@ const formatDate = (value: string) => {
 
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "Not set" : parsed.toLocaleDateString();
-};
-
-const formatCurrency = (value: string) => {
-  const numeric = parseFloat(String(value ?? "").replace(/[^0-9.-]/g, ""));
-  if (!Number.isFinite(numeric)) {
-    return "Not set";
-  }
-
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(numeric);
 };
 
 const daysUntil = (dateValue: string) => {

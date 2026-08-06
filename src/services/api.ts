@@ -203,12 +203,50 @@ export const adminAPI = {
   },
 };
 
+export type CustomerQuery = {
+  search?: string;
+  status?: string;
+  page?: number;
+  pageSize?: number;
+  sortBy?: string;
+  sortDirection?: "asc" | "desc";
+  expiringWithinDays?: number;
+  // Lists soft-deleted customers instead of live ones, so a removed record can
+  // be found and restored.
+  deleted?: boolean;
+};
+
+export type Pagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+const toQueryString = (params: Record<string, unknown>) => {
+  const search = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      search.set(key, String(value));
+    }
+  }
+
+  const query = search.toString();
+  return query ? `?${query}` : "";
+};
+
 export const customersAPI = {
-  async getAll() {
+  // Filtering, sorting and paging happen in the database now. This endpoint
+  // used to return every customer with every subscription and every payment
+  // and let the browser do the work, so opening any screen downloaded the
+  // entire customer base.
+  async list(params: CustomerQuery = {}) {
     try {
-      const response = await fetch(`${API_BASE_URL}/customers`, {
-        headers: createHeaders(),
-      });
+      const response = await fetch(
+        `${API_BASE_URL}/customers${toQueryString(params as Record<string, unknown>)}`,
+        { headers: createHeaders() }
+      );
 
       return await handleResponse(response);
     } catch (error) {
@@ -323,6 +361,125 @@ export const customersAPI = {
       return handleFetchError(error as Error);
     }
   },
+
+  async refundPayment(id: string, paymentId: string, reason?: string) {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/customers/${id}/payments/${paymentId}/refund`,
+        {
+          method: "POST",
+          headers: createHeaders(),
+          body: JSON.stringify({ reason }),
+        }
+      );
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async cancelService(id: string, serviceId: string) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/customers/${id}/services/${serviceId}`, {
+        method: "DELETE",
+        headers: createHeaders(),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async restore(id: string) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/customers/${id}/restore`, {
+        method: "POST",
+        headers: createHeaders(),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async setPortalAccess(id: string, enabled: boolean) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/customers/${id}/portal-access`, {
+        method: "PUT",
+        headers: createHeaders(),
+        body: JSON.stringify({ enabled }),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async getActivity(id: string) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/customers/${id}/activity`, {
+        headers: createHeaders(),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+};
+
+export const reportsAPI = {
+  async getSummary() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/reports/summary`, {
+        headers: createHeaders(),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async getRevenue(months = 12) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/reports/revenue?months=${months}`, {
+        headers: createHeaders(),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  // Goes straight to a download rather than through handleResponse, which
+  // expects a JSON body.
+  async downloadCsv(report: "customers" | "renewals", params: Record<string, unknown> = {}) {
+    const token = getAuthToken();
+    const response = await fetch(
+      `${API_BASE_URL}/reports/${report}.csv${toQueryString(params)}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    );
+
+    if (!response.ok) {
+      throw new ApiError(`Export failed with status ${response.status}.`, response.status);
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${report}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  },
 };
 
 export const healthAPI = {
@@ -352,6 +509,20 @@ export const notificationsAPI = {
   async send(data: unknown) {
     try {
       const response = await fetch(`${API_BASE_URL}/notifications/send`, {
+        method: "POST",
+        headers: createHeaders(),
+        body: JSON.stringify(data),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async broadcast(data: unknown) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/notifications/broadcast`, {
         method: "POST",
         headers: createHeaders(),
         body: JSON.stringify(data),
@@ -510,6 +681,47 @@ export const plansAPI = {
       });
 
       return await handleCustomerResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async create(data: unknown) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/plans`, {
+        method: "POST",
+        headers: createHeaders(),
+        body: JSON.stringify(data),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async update(id: string, data: unknown) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/plans/${id}`, {
+        method: "PUT",
+        headers: createHeaders(),
+        body: JSON.stringify(data),
+      });
+
+      return await handleResponse(response);
+    } catch (error) {
+      return handleFetchError(error as Error);
+    }
+  },
+
+  async retire(id: string) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/plans/${id}`, {
+        method: "DELETE",
+        headers: createHeaders(),
+      });
+
+      return await handleResponse(response);
     } catch (error) {
       return handleFetchError(error as Error);
     }

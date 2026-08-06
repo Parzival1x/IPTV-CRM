@@ -3,18 +3,23 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import ServiceDetailsCard from "../components/common/ServiceDetailsCard";
 import ServiceEditorModal from "../components/common/ServiceEditorModal";
 import RecordPaymentModal from "../components/common/RecordPaymentModal";
-import TwilioWhatsAppMessaging from "../components/common/TwilioWhatsAppMessaging";
+import CustomerMessaging from "../components/common/CustomerMessaging";
 import {
   addCustomerService,
   getCustomerById,
   recordCustomerPayment,
   resetCustomerPortalPassword,
+  refundCustomerPayment,
+  cancelCustomerService,
+  getCustomerActivity,
+  type CustomerActivityEntry,
   type Customer,
   type CustomerSubscription,
   type CustomerServiceInput,
   updateCustomerService,
 } from "../data/customersDB";
 
+import { formatCurrencyOrFallback as formatCurrency } from "../utils/currency";
 type Notice = {
   type: "success" | "error";
   text: string;
@@ -32,20 +37,6 @@ const formatDate = (value: string) => {
 
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "Not set" : parsed.toLocaleDateString();
-};
-
-const formatCurrency = (value: string) => {
-  const numeric = parseFloat(String(value ?? "").replace(/[^0-9.-]/g, ""));
-  if (!Number.isFinite(numeric)) {
-    return "Not set";
-  }
-
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(numeric);
 };
 
 const daysUntil = (dateValue: string) => {
@@ -169,6 +160,9 @@ export default function CustomerDetail() {
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [serviceEditorMode, setServiceEditorMode] = useState<"create" | "edit">("create");
   const [selectedService, setSelectedService] = useState<CustomerSubscription | null>(null);
+  const [activity, setActivity] = useState<CustomerActivityEntry[]>([]);
+  const [busyPaymentId, setBusyPaymentId] = useState<string | null>(null);
+  const [busyServiceId, setBusyServiceId] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -206,6 +200,20 @@ export default function CustomerDetail() {
         }
 
         setCustomer(record);
+
+        // Best effort: the audit trail is context, not the point of the page,
+        // so a failure to load it must not blank out the customer.
+        try {
+          const entries = await getCustomerActivity(record.id);
+
+          if (isMounted) {
+            setActivity(entries);
+          }
+        } catch {
+          if (isMounted) {
+            setActivity([]);
+          }
+        }
       } catch (error) {
         if (isMounted) {
           setNotice({
@@ -353,6 +361,89 @@ export default function CustomerDetail() {
       });
     } finally {
       setIsResettingPortal(false);
+    }
+  };
+
+  const refreshActivity = async (customerId: string) => {
+    try {
+      setActivity(await getCustomerActivity(customerId));
+    } catch {
+      // Leave the previous entries in place rather than clearing the panel.
+    }
+  };
+
+  const handleRefundPayment = async (paymentId: string, label: string, amount: string) => {
+    if (!customer) {
+      return;
+    }
+
+    const reason = window.prompt(
+      `Refund ${formatCurrency(amount, customer.currency)} for "${label}"?\n\n` +
+        "This reverses the renewal it paid for and returns the account to its previous " +
+        "expiry date. Optionally give a reason:",
+      ""
+    );
+
+    // prompt returns null when cancelled and "" when submitted empty; only the
+    // former means "do not do this".
+    if (reason === null) {
+      return;
+    }
+
+    setBusyPaymentId(paymentId);
+    setNotice(null);
+
+    try {
+      const updated = await refundCustomerPayment(customer.id, paymentId, reason);
+
+      if (updated) {
+        setCustomer(updated);
+        await refreshActivity(customer.id);
+        setNotice({ type: "success", text: "The payment was refunded and the renewal reversed." });
+      }
+    } catch (error) {
+      setNotice({
+        type: "error",
+        text: error instanceof Error ? error.message : "Unable to refund this payment.",
+      });
+    } finally {
+      setBusyPaymentId(null);
+    }
+  };
+
+  const handleCancelService = async (service: CustomerSubscription) => {
+    if (!customer) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Cancel "${service.serviceLabel || service.planName}"?\n\n` +
+        "The service stops renewing and is kept in the customer's history. " +
+        "Payments already recorded against it are not affected."
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setBusyServiceId(service.id);
+    setNotice(null);
+
+    try {
+      const updated = await cancelCustomerService(customer.id, service.id);
+
+      if (updated) {
+        setCustomer(updated);
+        await refreshActivity(customer.id);
+        setNotice({ type: "success", text: "The service was cancelled and will not renew." });
+      }
+    } catch (error) {
+      setNotice({
+        type: "error",
+        text: error instanceof Error ? error.message : "Unable to cancel this service.",
+      });
+    } finally {
+      setBusyServiceId(null);
     }
   };
 
@@ -566,12 +657,19 @@ export default function CustomerDetail() {
         ) : (
           <div className="space-y-4">
             {serviceSummary.active.map((service) => (
-              <ServiceDetailsCard
-                key={service.id}
-                service={service}
-                mode="admin"
-                onEdit={handleOpenEditService}
-              />
+              <div key={service.id} className="space-y-2">
+                <ServiceDetailsCard service={service} mode="admin" onEdit={handleOpenEditService} />
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleCancelService(service)}
+                    disabled={busyServiceId === service.id}
+                    className="rounded-xl border border-rose-200 px-3 py-2 text-sm text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {busyServiceId === service.id ? "Cancelling..." : "Cancel service"}
+                  </button>
+                </div>
+              </div>
             ))}
 
             {serviceSummary.active.length === 0 ? (
@@ -743,9 +841,35 @@ export default function CustomerDetail() {
                           {formatDate(payment.paymentDate)} • {safeText(payment.transactionId, "No transaction ID")}
                         </div>
                       </div>
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
-                        {payment.status}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                            payment.status === "refunded"
+                              ? "bg-rose-100 text-rose-700"
+                              : payment.status === "paid"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-slate-100 text-slate-700"
+                          }`}
+                        >
+                          {payment.status}
+                        </span>
+                        {payment.isRefundable ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleRefundPayment(
+                                payment.id,
+                                payment.serviceLabel,
+                                payment.finalAmount
+                              )
+                            }
+                            disabled={busyPaymentId === payment.id}
+                            className="rounded-xl border border-rose-200 px-3 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {busyPaymentId === payment.id ? "Refunding..." : "Refund"}
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                       <DetailRow
@@ -771,6 +895,29 @@ export default function CustomerDetail() {
                         tone={payment.nextDueDate ? "neutral" : payment.subscriptionId ? "debt" : "credit"}
                       />
                     </div>
+
+                    {payment.allocations.length > 1 ||
+                    parseFloat(payment.creditAmount || "0") > 0 ? (
+                      <div className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+                        <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+                          How this payment was applied
+                        </div>
+                        <ul className="mt-2 space-y-1 text-sm text-slate-600">
+                          {payment.allocations.map((allocation) => (
+                            <li key={allocation.id} className="flex justify-between gap-4">
+                              <span>
+                                {allocation.serviceLabel}
+                                {allocation.renewed ? " (renewed)" : ""}
+                                {allocation.consumed ? " (credit since used)" : ""}
+                              </span>
+                              <span className="font-medium text-slate-900">
+                                {formatCurrency(allocation.amount, payment.currency)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -785,11 +932,41 @@ export default function CustomerDetail() {
               {safeText(customer.note, "No notes recorded yet.")}
             </div>
           </CustomerDetailSection>
+
+          <CustomerDetailSection
+            title="Activity"
+            description="Every administrative action taken on this account, and who took it."
+          >
+            {activity.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-500">
+                Nothing has been recorded against this customer yet.
+              </div>
+            ) : (
+              <ol className="space-y-3">
+                {activity.slice(0, 20).map((entry) => (
+                  <li
+                    key={entry.id}
+                    className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <span className="text-sm font-semibold text-slate-900">
+                        {entry.action.replace(/_/g, " ")}
+                      </span>
+                      <span className="text-xs text-slate-500">
+                        {new Date(entry.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-sm text-slate-500">by {entry.actorName}</div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </CustomerDetailSection>
         </div>
       </section>
 
       {showNotificationModal ? (
-        <TwilioWhatsAppMessaging
+        <CustomerMessaging
           isOpen={showNotificationModal}
           customer={{
             id: customer.id,

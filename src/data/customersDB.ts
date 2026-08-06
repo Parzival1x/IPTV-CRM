@@ -1,5 +1,4 @@
-import { customersAPI, ApiError } from '../services/api';
-import { formatCreditAmount } from '../utils/creditFormatter';
+import { customersAPI, ApiError, type CustomerQuery, type Pagination } from '../services/api';
 
 // Customer interface
 export interface CustomerSubscription {
@@ -23,10 +22,27 @@ export interface CustomerSubscription {
   portalUrl: string;
   billingUrl: string;
   maxConnections: number;
+  durationMonths: number;
   features: string[];
   category: string;
   sku: string;
+  currency: string;
+  // How far into the current billing cycle the customer has paid. A part
+  // payment used to be written as a `pending` row that no balance calculation
+  // counted, so the money vanished from every screen.
+  cyclePaidAmount: string;
+  outstandingAmount: string;
+  isPartiallyPaid: boolean;
   metadata: Record<string, unknown>;
+}
+
+export interface CustomerPaymentAllocation {
+  id: string;
+  subscriptionId: string | null;
+  serviceLabel: string;
+  amount: string;
+  renewed: boolean;
+  consumed: boolean;
 }
 
 export interface CustomerPayment {
@@ -37,11 +53,18 @@ export interface CustomerPayment {
   finalAmount: string;
   discount: string;
   tax: string;
+  currency: string;
   paymentMode: string;
   status: 'paid' | 'pending' | 'failed' | 'refunded';
   transactionId: string;
   paymentDate: string;
   nextDueDate: string;
+  notes: string;
+  isRefundable: boolean;
+  // One payment event split across several services is one payment with
+  // several allocations, rather than several payment rows.
+  allocations: CustomerPaymentAllocation[];
+  creditAmount: string;
 }
 
 export interface CustomerPaymentSummary {
@@ -49,10 +72,14 @@ export interface CustomerPaymentSummary {
   dueNow: string;
   overdueAmount: string;
   totalPaid: string;
+  totalRefunded: string;
   availableCredit: string;
   outstandingBalance: string;
   dueSoonServiceCount: number;
   overdueServiceCount: number;
+  activeServiceCount: number;
+  serviceCount: number;
+  lastPaymentDate: string | null;
 }
 
 export interface Customer {
@@ -77,6 +104,9 @@ export interface Customer {
   paymentMode: string;
   amount: string;
   expiryDate: string;
+  currency: string;
+  // Read-only. These come from the customer_financials view and are no longer
+  // stored or accepted from the client; the API discards them on write.
   totalCredit: string;
   alreadyGiven: string;
   remainingCredits: string;
@@ -85,9 +115,15 @@ export interface Customer {
   portalAccessEnabled?: boolean;
   portalResetRequired?: boolean;
   portalLastLogin?: string | null;
+  portalPasswordExpiresAt?: string | null;
+  deletedAt?: string | null;
+  whatsappOptIn?: boolean;
+  emailOptIn?: boolean;
   portalSetup?: {
     temporaryPassword: string;
     resetRequired: boolean;
+    expiresAt?: string;
+    expiresInHours?: number;
   };
   subscriptions: CustomerSubscription[];
   payments?: CustomerPayment[];
@@ -126,10 +162,18 @@ export interface CustomerPaymentInput {
   paymentMode: string;
   paymentDate?: string;
   transactionId?: string;
+  discount?: string;
+  tax?: string;
+  currency?: string;
+  notes?: string;
+  // Draw on any credit the customer is already sitting on before charging the
+  // shortfall. Defaults to true server side.
+  applyCredit?: boolean;
 }
 
 type CustomersResponse = {
   customers?: Customer[];
+  pagination?: Pagination;
 };
 
 type CustomerResponse = {
@@ -137,76 +181,44 @@ type CustomerResponse = {
   portalSetup?: Customer["portalSetup"];
 };
 
-const parseCurrencyValue = (value: string | number): number => {
-  if (typeof value === 'number') {
-    return value;
-  }
-
-  return parseFloat(String(value).replace(/[^0-9.-]/g, '')) || 0;
+export type CustomerListResult = {
+  customers: Customer[];
+  pagination: Pagination;
 };
 
-// Calculate credits based on payment amount, service price, and service duration
-export const calculateCustomerCredits = (
-  paymentAmount: number,
-  servicePrice: number,
-  paymentDate: string,
-  serviceDuration: number
-): { totalCredit: string; alreadyGiven: string; remainingCredits: string; expiryDate: string } => {
-  const totalCredit = paymentAmount;
-  
-  // Calculate how many months have passed since payment date
-  const paymentDateObj = new Date(paymentDate);
-  const currentDate = new Date();
-  const monthsPassed = Math.floor((currentDate.getTime() - paymentDateObj.getTime()) / (1000 * 60 * 60 * 24 * 30));
-  const actualMonthsPassed = Math.max(0, Math.min(monthsPassed, serviceDuration));
-  
-  const alreadyGiven = servicePrice * actualMonthsPassed;
-  const remainingCredits = Math.max(0, totalCredit - alreadyGiven);
-  
-  // Calculate expiry date
-  const expiryDate = new Date(paymentDateObj);
-  expiryDate.setMonth(expiryDate.getMonth() + serviceDuration);
-  
-  return {
-    totalCredit: formatCreditAmount(totalCredit),
-    alreadyGiven: formatCreditAmount(alreadyGiven),
-    remainingCredits: formatCreditAmount(remainingCredits),
-    expiryDate: expiryDate.toISOString().split('T')[0]
-  };
-}
+const EMPTY_PAGINATION: Pagination = { page: 1, pageSize: 25, total: 0, totalPages: 1 };
 
-// Recalculate credits when payment date changes
-export const recalculateCreditsOnPaymentDateChange = (
-  customer: Customer,
-  newPaymentDate: string,
-  servicePrice: number = 25 // Default service price
-): { alreadyGiven: string; remainingCredits: string; expiryDate: string } => {
-  const paymentAmount = parseCurrencyValue(customer.amount);
-  const serviceDuration = parseInt(customer.serviceDuration) || 12;
-  
-  // Calculate new credits with updated payment date
-  const newCredits = calculateCustomerCredits(
-    paymentAmount,
-    servicePrice,
-    newPaymentDate,
-    serviceDuration
-  );
-  
+// Server-side search, filter, sort and paging.
+export const listCustomers = async (
+  params: CustomerQuery = {}
+): Promise<CustomerListResult> => {
+  const response = (await customersAPI.list(params)) as CustomersResponse;
+
   return {
-    alreadyGiven: newCredits.alreadyGiven,
-    remainingCredits: newCredits.remainingCredits,
-    expiryDate: newCredits.expiryDate
+    customers: response.customers || [],
+    pagination: response.pagination || EMPTY_PAGINATION,
   };
 };
 
-// Get all customers
-export const getAllCustomers = async (): Promise<Customer[]> => {
-  try {
-    const response = (await customersAPI.getAll()) as CustomersResponse;
-    return response.customers || [];
-  } catch (error) {
-    throw error;
+// Everything, by paging through the API. Only for callers that genuinely need
+// the whole set -- an export, a bulk action over a filtered selection. Screens
+// should use listCustomers and page.
+export const getAllCustomers = async (params: CustomerQuery = {}): Promise<Customer[]> => {
+  const collected: Customer[] = [];
+  let page = 1;
+
+  for (;;) {
+    const { customers, pagination } = await listCustomers({ ...params, page, pageSize: 200 });
+    collected.push(...customers);
+
+    if (customers.length === 0 || page >= pagination.totalPages) {
+      break;
+    }
+
+    page += 1;
   }
+
+  return collected;
 };
 
 // Get customer by ID
@@ -223,47 +235,23 @@ export const getCustomerById = async (id: string): Promise<Customer | null> => {
   }
 };
 
-// Create new customer with automatic credit calculation
+// Create new customer.
+//
+// This used to run calculateCustomerCredits() -- with a service price
+// hardcoded to 25 -- and post the resulting totalCredit / alreadyGiven /
+// remainingCredits along with an expiry date derived from them. The server
+// overwrote the balances but kept the expiry, so every new customer got a
+// fabricated one. The server owns all of it now.
 export const createCustomer = async (
-  customerData: Omit<Customer, 'id' | 'subscriptions'> & { services?: CustomerServiceInput[] }
+  customerData: Partial<Customer> & { services?: CustomerServiceInput[] }
 ): Promise<Customer> => {
-  try {
-    // If payment amount and service duration are provided, calculate credits automatically
-    let processedData = { ...customerData };
-    
-    if (customerData.amount && customerData.serviceDuration && customerData.paymentDate) {
-      const paymentAmount = parseCurrencyValue(customerData.amount);
-      const serviceDuration = parseInt(customerData.serviceDuration);
-      const servicePrice = 25; // Default service price - you can make this dynamic based on selected service
-      
-      if (!isNaN(paymentAmount) && !isNaN(serviceDuration)) {
-        const calculatedCredits = calculateCustomerCredits(
-          paymentAmount,
-          servicePrice,
-          customerData.paymentDate,
-          serviceDuration
-        );
-        
-        processedData = {
-          ...processedData,
-          totalCredit: calculatedCredits.totalCredit,
-          alreadyGiven: calculatedCredits.alreadyGiven,
-          remainingCredits: calculatedCredits.remainingCredits,
-          expiryDate: calculatedCredits.expiryDate
-        };
-      }
-    }
-    
-    const response = (await customersAPI.create(processedData)) as CustomerResponse;
+  const response = (await customersAPI.create(customerData)) as CustomerResponse;
 
-    if (!response.customer) {
-      throw new Error('Customer creation succeeded without a returned customer record.');
-    }
-
-    return response.customer;
-  } catch (error) {
-    throw error;
+  if (!response.customer) {
+    throw new Error('Customer creation succeeded without a returned customer record.');
   }
+
+  return response.customer;
 };
 
 // Update customer
@@ -340,3 +328,48 @@ export const recordCustomerPayment = async (
   }
 };
 
+export const refundCustomerPayment = async (
+  customerId: string,
+  paymentId: string,
+  reason?: string
+): Promise<Customer | null> => {
+  const response = (await customersAPI.refundPayment(customerId, paymentId, reason)) as CustomerResponse;
+  return response.customer || null;
+};
+
+export const cancelCustomerService = async (
+  customerId: string,
+  serviceId: string
+): Promise<Customer | null> => {
+  const response = (await customersAPI.cancelService(customerId, serviceId)) as CustomerResponse;
+  return response.customer || null;
+};
+
+export const restoreCustomer = async (id: string): Promise<Customer | null> => {
+  const response = (await customersAPI.restore(id)) as CustomerResponse;
+  return response.customer || null;
+};
+
+export const setCustomerPortalAccess = async (
+  id: string,
+  enabled: boolean
+): Promise<Customer | null> => {
+  const response = (await customersAPI.setPortalAccess(id, enabled)) as CustomerResponse;
+  return response.customer || null;
+};
+
+export interface CustomerActivityEntry {
+  id: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  actorName: string;
+  actorEmail: string;
+}
+
+export const getCustomerActivity = async (id: string): Promise<CustomerActivityEntry[]> => {
+  const response = (await customersAPI.getActivity(id)) as { activity?: CustomerActivityEntry[] };
+  return response.activity || [];
+};

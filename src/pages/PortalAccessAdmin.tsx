@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   getAllCustomers,
   resetCustomerPortalPassword,
+  setCustomerPortalAccess,
   type Customer,
 } from "../data/customersDB";
 
@@ -85,6 +86,7 @@ export default function PortalAccessAdmin() {
   const [notice, setNotice] = useState<Notice>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [latestCredentials, setLatestCredentials] = useState<ResetCredential[]>([]);
+  const [togglingIds, setTogglingIds] = useState<string[]>([]);
   const openCustomer = (customerId: string) => navigate(`/customers/${customerId}`);
   const handleOpenKeyDown = (
     event: KeyboardEvent<HTMLTableRowElement>,
@@ -106,6 +108,9 @@ export default function PortalAccessAdmin() {
     setNotice(null);
 
     try {
+      // Pages through the API rather than issuing one unbounded query. This
+      // screen genuinely wants every customer -- it reports portal status
+      // across the whole base -- so it is the intended caller of getAll.
       const records = await getAllCustomers();
       setCustomers(records);
     } catch (error) {
@@ -208,6 +213,49 @@ export default function PortalAccessAdmin() {
       });
     } finally {
       setProcessingIds((current) => current.filter((id) => id !== customer.id));
+    }
+  };
+
+  const handleTogglePortalAccess = async (customer: Customer) => {
+    const enabling = customer.portalAccessEnabled === false;
+
+    if (!enabling) {
+      const confirmed = window.confirm(
+        `Disable portal access for ${customer.name}?\n\n` +
+          "They are signed out immediately and cannot sign in again until access " +
+          "is restored. Their account and payment history are unaffected."
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setTogglingIds((current) => [...current, customer.id]);
+    setNotice(null);
+
+    try {
+      const updated = await setCustomerPortalAccess(customer.id, enabling);
+
+      if (updated) {
+        setCustomers((current) =>
+          current.map((entry) => (entry.id === updated.id ? updated : entry))
+        );
+        setNotice({
+          type: "success",
+          text: enabling
+            ? `Portal access restored for ${customer.name}.`
+            : `Portal access disabled for ${customer.name}. Any open session has been signed out.`,
+        });
+      }
+    } catch (error) {
+      setNotice({
+        type: "error",
+        text:
+          error instanceof Error ? error.message : "Unable to change portal access.",
+      });
+    } finally {
+      setTogglingIds((current) => current.filter((id) => id !== customer.id));
     }
   };
 
@@ -484,8 +532,16 @@ export default function PortalAccessAdmin() {
                           {safeText(customer.customerCode, "No customer code")}
                         </div>
                       </td>
-                      <td className="px-6 py-4 text-sm text-slate-700">
-                        {customer.portalAccessEnabled ? "Enabled" : "Disabled"}
+                      <td className="px-6 py-4 text-sm">
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                            customer.portalAccessEnabled
+                              ? "bg-emerald-100 text-emerald-700"
+                              : "bg-slate-200 text-slate-600"
+                          }`}
+                        >
+                          {customer.portalAccessEnabled ? "Enabled" : "Disabled"}
+                        </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-700">
                         {customer.portalResetRequired ? "Yes" : "No"}
@@ -505,6 +561,25 @@ export default function PortalAccessAdmin() {
                             className="rounded-xl border border-cyan-200 px-3 py-2 text-sm text-cyan-700 transition hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-60"
                           >
                             {isProcessing ? "Resetting..." : "Reset password"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              stopRowNavigation(event);
+                              handleTogglePortalAccess(customer);
+                            }}
+                            disabled={togglingIds.includes(customer.id) || bulkProcessing}
+                            className={`rounded-xl border px-3 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                              customer.portalAccessEnabled
+                                ? "border-rose-200 text-rose-700 hover:bg-rose-50"
+                                : "border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                            }`}
+                          >
+                            {togglingIds.includes(customer.id)
+                              ? "Saving..."
+                              : customer.portalAccessEnabled
+                                ? "Disable access"
+                                : "Enable access"}
                           </button>
                           <Link
                             to={`/customers/${customer.id}`}

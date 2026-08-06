@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { getAllCustomers, type Customer } from "../data/customersDB";
+import { reportsAPI } from "../services/api";
 
+import { formatCurrencyOrFallback as formatCurrency } from "../utils/currency";
 const safeText = (value: unknown, fallback = "Not available") => {
   const normalized = String(value ?? "").trim();
   return normalized || fallback;
@@ -14,21 +16,6 @@ const formatDate = (value: string) => {
 
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "Not set" : parsed.toLocaleDateString();
-};
-
-const formatCurrency = (value: string) => {
-  const numeric = parseFloat(String(value ?? "").replace(/[^0-9.-]/g, ""));
-
-  if (!Number.isFinite(numeric)) {
-    return "Not set";
-  }
-
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(numeric);
 };
 
 const daysUntil = (dateValue: string) => {
@@ -121,6 +108,11 @@ export default function PaymentStatusReview() {
   const [reviewFilter, setReviewFilter] = useState<
     "all" | "overdue" | "due-soon" | "current" | "missing-dates"
   >("all");
+  // This screen used to pull the entire customer base to find the handful of
+  // accounts needing attention. The horizon bounds that at the database: a
+  // customer expiring in eight months is not part of a renewal queue.
+  const [horizonDays, setHorizonDays] = useState<number | null>(90);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -130,7 +122,9 @@ export default function PaymentStatusReview() {
       setError(null);
 
       try {
-        const records = await getAllCustomers();
+        const records = await getAllCustomers(
+          horizonDays === null ? {} : { expiringWithinDays: horizonDays }
+        );
 
         if (isMounted) {
           setCustomers(records);
@@ -155,7 +149,7 @@ export default function PaymentStatusReview() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [horizonDays]);
 
   useEffect(() => {
     const filterParam = searchParams.get("filter");
@@ -310,6 +304,7 @@ export default function PaymentStatusReview() {
       </section>
 
       <section className="rounded-3xl border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
           {[
             ["all", "All"],
@@ -335,6 +330,52 @@ export default function PaymentStatusReview() {
               {label}
             </button>
           ))}
+        </div>
+
+          <div className="flex flex-wrap items-center gap-2 px-1">
+            <label className="text-sm text-slate-500" htmlFor="renewal-horizon">
+              Horizon
+            </label>
+            <select
+              id="renewal-horizon"
+              value={horizonDays === null ? "all" : String(horizonDays)}
+              onChange={(event) =>
+                setHorizonDays(event.target.value === "all" ? null : Number(event.target.value))
+              }
+              className="rounded-2xl border border-slate-200 px-3 py-2 text-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+            >
+              <option value="30">Next 30 days</option>
+              <option value="60">Next 60 days</option>
+              <option value="90">Next 90 days</option>
+              <option value="365">Next year</option>
+              <option value="all">Every customer</option>
+            </select>
+            <button
+              type="button"
+              disabled={exporting}
+              onClick={async () => {
+                setExporting(true);
+
+                try {
+                  await reportsAPI.downloadCsv(
+                    "renewals",
+                    horizonDays === null ? {} : { withinDays: horizonDays }
+                  );
+                } catch (exportError) {
+                  setError(
+                    exportError instanceof Error
+                      ? exportError.message
+                      : "Unable to export the renewal queue."
+                  );
+                } finally {
+                  setExporting(false);
+                }
+              }}
+              className="rounded-2xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {exporting ? "Exporting..." : "Export CSV"}
+            </button>
+          </div>
         </div>
       </section>
 

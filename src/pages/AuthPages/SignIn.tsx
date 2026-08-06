@@ -3,6 +3,27 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { healthAPI } from "../../services/api";
 import { authService } from "../../services/auth";
 
+// Where to land after signing in. The value arrives from ProtectedRoute via
+// router state rather than a query string, so it is not attacker-controlled
+// today — but "redirect back to where you were" is the classic open-redirect
+// shape, and one guard here is cheaper than depending on every future caller
+// and every router version behaving. Only a single-slash, same-origin path
+// passes: `//evil.com` and `/\evil.com` are protocol-relative URLs that
+// browsers resolve to another host, not local paths.
+const safeRedirect = (target?: string): string => {
+  const fallback = "/dashboard";
+
+  if (typeof target !== "string" || !target.startsWith("/")) {
+    return fallback;
+  }
+
+  if (target.startsWith("//") || target.startsWith("/\\")) {
+    return fallback;
+  }
+
+  return target;
+};
+
 const SignIn = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -60,8 +81,7 @@ const SignIn = () => {
     );
 
     if (result.success) {
-      const from = location.state?.from?.pathname || "/dashboard";
-      navigate(from, { replace: true });
+      navigate(safeRedirect(location.state?.from?.pathname), { replace: true });
       setIsLoading(false);
       return;
     }

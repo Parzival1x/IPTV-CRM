@@ -3,13 +3,17 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const { jwtSecret } = require('../config/runtime');
 const { protectCustomer } = require('../middleware/auth');
+const { customerLoginLimiter } = require('../middleware/rateLimit');
+const { assertStrongPassword } = require('../middleware/validation');
 const customerRepository = require('../repositories/customerRepository');
 
 const router = express.Router();
 
-const generateCustomerToken = (customerId) =>
+// See the admin equivalent: tokenVersion is what lets a password change or a
+// revoked portal account end a session that is already open.
+const generateCustomerToken = (customer) =>
   jwt.sign(
-    { id: customerId, kind: 'customer' },
+    { id: customer.id, kind: 'customer', tokenVersion: Number(customer.tokenVersion || 0) },
     jwtSecret,
     { expiresIn: process.env.CUSTOMER_JWT_EXPIRES_IN || '7d' }
   );
@@ -31,7 +35,8 @@ const handleValidationErrors = (req, res) => {
 
 router.post(
   '/login',
-  [body('email').isEmail().normalizeEmail(), body('password').isLength({ min: 6 })],
+  customerLoginLimiter,
+  [body('email').isEmail().normalizeEmail(), body('password').isLength({ min: 1, max: 200 })],
   async (req, res) => {
     try {
       if (handleValidationErrors(req, res)) {
@@ -50,9 +55,20 @@ router.post(
         });
       }
 
+      // The password was right but the temporary one they were issued has
+      // since expired. Say so specifically -- a generic "invalid credentials"
+      // sends them round in circles retyping a password that is correct.
+      if (customer.expired) {
+        return res.status(401).json({
+          success: false,
+          code: 'password_expired',
+          message: 'This temporary password has expired. Ask your provider to send a new one.'
+        });
+      }
+
       res.json({
         success: true,
-        token: generateCustomerToken(customer.id),
+        token: generateCustomerToken(customer),
         customer
       });
     } catch (error) {
@@ -74,7 +90,10 @@ router.get('/me', protectCustomer, async (req, res) => {
 router.put(
   '/change-password',
   protectCustomer,
-  [body('currentPassword').isLength({ min: 6 }), body('newPassword').isLength({ min: 8 })],
+  [
+    body('currentPassword').isLength({ min: 1, max: 200 }),
+    body('newPassword').custom(assertStrongPassword)
+  ],
   async (req, res) => {
     try {
       if (handleValidationErrors(req, res)) {
@@ -99,8 +118,12 @@ router.put(
 
       const customer = await customerRepository.getPortalCustomerById(req.customer.id);
 
+      // The change bumped tokenVersion, so the token this request arrived with
+      // is now stale. Issue a fresh one, or the customer is signed out by
+      // their own password change.
       res.json({
         success: true,
+        token: generateCustomerToken({ id: req.customer.id, tokenVersion: result.tokenVersion }),
         customer
       });
     } catch (error) {

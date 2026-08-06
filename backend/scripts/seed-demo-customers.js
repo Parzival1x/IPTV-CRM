@@ -39,7 +39,7 @@ const demoCustomers = [
     serviceDuration: '6',
     box: 'BOX-U001',
     mac: 'AA:11:22:33:44:55',
-    portalPassword: 'user123',
+    portalPassword: 'demo-portal-2026',
     services: [
       {
         templateId: 'IPTV-PRE-001',
@@ -343,7 +343,11 @@ const setSpecificPortalPassword = async (customerId, password) => {
     .update({
       portal_password_hash: await bcrypt.hash(password, 12),
       portal_access_enabled: true,
-      portal_reset_required: true
+      // A known demo password is set deliberately and should not be treated as
+      // an outstanding reset, or it expires and the documented demo login
+      // stops working after PORTAL_PASSWORD_TTL_HOURS.
+      portal_reset_required: false,
+      portal_password_expires_at: null
     })
     .eq('id', customerId);
 
@@ -360,7 +364,9 @@ const ensureCustomer = async (entry) => {
       await setSpecificPortalPassword(existing.id, entry.portalPassword);
     }
 
-    return { action: 'existing', customer: existing };
+    // findByEmail returns only the identifiers it needs for a uniqueness
+    // check; the summary printed below wants the whole record.
+    return { action: 'existing', customer: await customerRepository.getById(existing.id) };
   }
 
   const created = await customerRepository.create(entry);
@@ -379,7 +385,7 @@ const run = async () => {
       serviceId: result.customer.serviceId,
       portalPassword:
         entry.email === 'user@example.com'
-          ? 'user123'
+          ? 'demo-portal-2026'
           : result.customer.portalSetup?.temporaryPassword || 'already-set'
     });
   }

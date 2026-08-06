@@ -13,6 +13,7 @@ const mapRowToAdmin = (row) => {
     role: row.role,
     avatar: row.avatar,
     isActive: row.is_active,
+    tokenVersion: Number(row.token_version || 0),
     lastLogin: row.last_login,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -182,16 +183,59 @@ const changePassword = async (id, currentPassword, newPassword) => {
     return { success: false, code: 'invalid_password' };
   }
 
+  const nextTokenVersion = Number(admin.token_version || 0) + 1;
   const supabase = getSupabaseServiceClient();
   const { error } = await supabase
     .from('admin_users')
     .update({
-      password_hash: await bcrypt.hash(newPassword, 12)
+      password_hash: await bcrypt.hash(newPassword, 12),
+      // Every session opened with the old password stops working. Without this
+      // a compromised password stays usable for the life of its token.
+      token_version: nextTokenVersion
     })
     .eq('id', id);
 
   assertNoSupabaseError(error, 'Unable to change admin password');
-  return { success: true };
+  return { success: true, tokenVersion: nextTokenVersion };
+};
+
+const setActive = async (id, isActive) => {
+  const supabase = getSupabaseServiceClient();
+  const { data: current, error: readError } = await supabase
+    .from('admin_users')
+    .select('token_version')
+    .eq('id', id)
+    .maybeSingle();
+
+  assertNoSupabaseError(readError, 'Unable to read admin before changing status');
+
+  if (!current) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('admin_users')
+    .update({
+      is_active: Boolean(isActive),
+      token_version: isActive ? current.token_version : Number(current.token_version || 0) + 1
+    })
+    .eq('id', id)
+    .select('*')
+    .maybeSingle();
+
+  assertNoSupabaseError(error, 'Unable to change admin status');
+  return mapRowToAdmin(data);
+};
+
+const list = async () => {
+  const supabase = getSupabaseServiceClient();
+  const { data, error } = await supabase
+    .from('admin_users')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  assertNoSupabaseError(error, 'Unable to list admins');
+  return (data || []).map(mapRowToAdmin);
 };
 
 module.exports = {
@@ -201,5 +245,7 @@ module.exports = {
   findByEmail,
   create,
   updateProfile,
-  changePassword
+  changePassword,
+  setActive,
+  list
 };

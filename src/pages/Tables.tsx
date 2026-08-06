@@ -1,13 +1,18 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { deleteCustomer, getAllCustomers, type Customer } from "../data/customersDB";
+import {
+  deleteCustomer,
+  listCustomers,
+  restoreCustomer,
+  type Customer,
+} from "../data/customersDB";
+import { notificationsAPI, reportsAPI, type Pagination } from "../services/api";
+import { formatCurrency } from "../utils/currency";
 
 type Notice = {
   type: "success" | "error";
   text: string;
 } | null;
-
-const asSearchableText = (value: unknown) => String(value ?? "").toLowerCase();
 
 const safeText = (value: unknown, fallback = "Not available") => {
   const normalized = String(value ?? "").trim();
@@ -55,6 +60,145 @@ const getAccountSummary = (customer: Customer) =>
     customer.serviceId,
     "No service ID"
   )}`;
+
+type BroadcastResult = {
+  sent: number;
+  failed: number;
+  skipped: number;
+  failures: { customerId: string; name: string; reason: string }[];
+};
+
+const BroadcastDialog = ({
+  customerIds,
+  onClose,
+  onDone,
+}: {
+  customerIds: string[];
+  onClose: () => void;
+  onDone: (summary: BroadcastResult) => void;
+}) => {
+  const [channels, setChannels] = useState<string[]>(["email"]);
+  const [message, setMessage] = useState("");
+  const [subject, setSubject] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggleChannel = (channel: string) =>
+    setChannels((current) =>
+      current.includes(channel)
+        ? current.filter((entry) => entry !== channel)
+        : [...current, channel]
+    );
+
+  const handleSend = async () => {
+    if (channels.length === 0) {
+      setError("Choose at least one channel.");
+      return;
+    }
+
+    if (message.trim().length < 2) {
+      setError("Write a message to send.");
+      return;
+    }
+
+    setSending(true);
+    setError(null);
+
+    try {
+      const response = (await notificationsAPI.broadcast({
+        customerIds,
+        channels,
+        templateName: "custom",
+        subject: subject.trim() || undefined,
+        metadata: { message: message.trim() },
+      })) as { summary: BroadcastResult };
+
+      onDone(response.summary);
+    } catch (sendError) {
+      setError(
+        sendError instanceof Error ? sendError.message : "Unable to send the broadcast."
+      );
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+      <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-xl">
+        <h3 className="text-xl font-semibold text-slate-950">
+          Message {customerIds.length} customer{customerIds.length === 1 ? "" : "s"}
+        </h3>
+        <p className="mt-1 text-sm text-slate-500">
+          Customers who have opted out of a channel are skipped automatically.
+        </p>
+
+        {error ? (
+          <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+            {error}
+          </div>
+        ) : null}
+
+        <div className="mt-5 space-y-4">
+          <div className="flex gap-2">
+            {["email", "whatsapp"].map((channel) => (
+              <button
+                key={channel}
+                type="button"
+                onClick={() => toggleChannel(channel)}
+                className={`rounded-2xl border px-4 py-2 text-sm font-medium capitalize transition ${
+                  channels.includes(channel)
+                    ? "border-cyan-500 bg-cyan-50 text-cyan-700"
+                    : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {channel}
+              </button>
+            ))}
+          </div>
+
+          {channels.includes("email") ? (
+            <input
+              value={subject}
+              onChange={(event) => setSubject(event.target.value)}
+              maxLength={160}
+              placeholder="Email subject (optional)"
+              className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+            />
+          ) : null}
+
+          <textarea
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            rows={6}
+            maxLength={5000}
+            placeholder="Your message to these customers."
+            className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+          />
+        </div>
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={sending}
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={sending}
+            className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {sending ? "Sending..." : "Send"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const CustomerActions = ({
   customer,
@@ -119,82 +263,160 @@ const CustomerActions = ({
 export default function Customers() {
   const navigate = useNavigate();
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [pagination, setPagination] = useState<Pagination>({
+    page: 1,
+    pageSize: 25,
+    total: 0,
+    totalPages: 1,
+  });
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [searchInput, setSearchInput] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | Customer["status"]>("all");
   const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [itemsPerPage, setItemsPerPage] = useState(25);
   const [notice, setNotice] = useState<Notice>(null);
+  // Soft-deleted customers were invisible with no route back, which made the
+  // restore endpoint unreachable.
+  const [showRemoved, setShowRemoved] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [isBroadcastOpen, setIsBroadcastOpen] = useState(false);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
 
-  const loadCustomers = async () => {
+  // Every keystroke used to re-filter an in-memory array. Now it is a request,
+  // so it waits for the typing to stop.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchTerm(searchInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  // Guards against an earlier, slower request landing after a later one and
+  // painting stale rows.
+  const requestRef = useRef(0);
+
+  const loadCustomers = useCallback(async () => {
+    const requestId = requestRef.current + 1;
+    requestRef.current = requestId;
+
     setLoading(true);
     setNotice(null);
 
     try {
-      const records = await getAllCustomers();
-      setCustomers(records);
+      const result = await listCustomers({
+        search: searchTerm,
+        status: statusFilter,
+        page: currentPage,
+        pageSize: itemsPerPage,
+        deleted: showRemoved,
+      });
+
+      if (requestRef.current !== requestId) {
+        return;
+      }
+
+      setCustomers(result.customers);
+      setPagination(result.pagination);
     } catch (error) {
+      if (requestRef.current !== requestId) {
+        return;
+      }
+
       setNotice({
         type: "error",
-        text:
-          error instanceof Error
-            ? error.message
-            : "Unable to load customer records.",
+        text: error instanceof Error ? error.message : "Unable to load customer records.",
       });
     } finally {
-      setLoading(false);
+      if (requestRef.current === requestId) {
+        setLoading(false);
+      }
     }
-  };
+  }, [searchTerm, statusFilter, currentPage, itemsPerPage, showRemoved]);
 
   useEffect(() => {
     loadCustomers();
-  }, []);
+  }, [loadCustomers]);
 
+  // A filter change means the current page number no longer refers to
+  // anything meaningful.
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, statusFilter, itemsPerPage]);
+    setSelectedIds([]);
+  }, [searchTerm, statusFilter, itemsPerPage, showRemoved]);
 
-  const filteredCustomers = useMemo(() => {
-    return customers.filter((customer) => {
-      const query = searchTerm.toLowerCase();
-      const matchesSearch =
-        asSearchableText(customer.name).includes(query) ||
-        asSearchableText(customer.email).includes(query) ||
-        asSearchableText(customer.phone).includes(query) ||
-        asSearchableText(customer.whatsappNumber).includes(query) ||
-        asSearchableText(customer.box).includes(query) ||
-        asSearchableText(customer.mac).includes(query) ||
-        asSearchableText(customer.customerCode).includes(query) ||
-        asSearchableText(customer.serviceId).includes(query);
+  const handleRestore = async (customer: Customer) => {
+    setRestoringId(customer.id);
+    setNotice(null);
 
-      const matchesStatus =
-        statusFilter === "all" ? true : customer.status === statusFilter;
+    try {
+      await restoreCustomer(customer.id);
+      await loadCustomers();
+      setNotice({ type: "success", text: `${customer.name} was restored.` });
+    } catch (error) {
+      setNotice({
+        type: "error",
+        text: error instanceof Error ? error.message : "Unable to restore this customer.",
+      });
+    } finally {
+      setRestoringId(null);
+    }
+  };
 
-      return matchesSearch && matchesStatus;
+  const toggleSelected = (customerId: string) =>
+    setSelectedIds((current) =>
+      current.includes(customerId)
+        ? current.filter((id) => id !== customerId)
+        : [...current, customerId]
+    );
+
+  const allOnPageSelected =
+    customers.length > 0 && customers.every((customer) => selectedIds.includes(customer.id));
+
+  const toggleSelectPage = () =>
+    setSelectedIds((current) =>
+      allOnPageSelected
+        ? current.filter((id) => !customers.some((customer) => customer.id === id))
+        : Array.from(new Set([...current, ...customers.map((customer) => customer.id)]))
+    );
+
+  const handleBroadcastDone = (summary: BroadcastResult) => {
+    setIsBroadcastOpen(false);
+    setSelectedIds([]);
+    setNotice({
+      type: summary.failed > 0 ? "error" : "success",
+      text:
+        `Sent to ${summary.sent} customer${summary.sent === 1 ? "" : "s"}.` +
+        (summary.skipped > 0 ? ` ${summary.skipped} skipped (opted out or unreachable).` : "") +
+        (summary.failed > 0 ? ` ${summary.failed} failed.` : ""),
     });
-  }, [customers, searchTerm, statusFilter]);
+  };
 
-  const totalPages =
-    itemsPerPage === 0 ? 1 : Math.max(1, Math.ceil(filteredCustomers.length / itemsPerPage));
-  const startIndex = itemsPerPage === 0 ? 0 : (currentPage - 1) * itemsPerPage;
-  const visibleCustomers =
-    itemsPerPage === 0
-      ? filteredCustomers
-      : filteredCustomers.slice(startIndex, startIndex + itemsPerPage);
+  const handleExport = async () => {
+    setExporting(true);
 
-  const stats = useMemo(
-    () => ({
-      total: customers.length,
-      active: customers.filter((customer) => customer.status === "active").length,
-      pending: customers.filter((customer) => customer.status === "pending").length,
-      inactive: customers.filter((customer) => customer.status === "inactive").length,
-    }),
-    [customers]
-  );
+    try {
+      await reportsAPI.downloadCsv("customers", {
+        search: searchTerm,
+        status: statusFilter,
+      });
+    } catch (error) {
+      setNotice({
+        type: "error",
+        text: error instanceof Error ? error.message : "Unable to export customers.",
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.pageSize + 1;
+  const rangeEnd = Math.min(pagination.page * pagination.pageSize, pagination.total);
+
+  const visibleCustomers = customers;
 
   const handleDelete = async (customerId: string, customerName: string) => {
     const confirmed = window.confirm(
-      `Delete customer "${customerName}"? This action cannot be undone.`
+      `Remove customer "${customerName}"? Their payment history is kept and the record can be restored.`
     );
 
     if (!confirmed) {
@@ -203,10 +425,10 @@ export default function Customers() {
 
     try {
       await deleteCustomer(customerId);
-      setCustomers((current) => current.filter((customer) => customer.id !== customerId));
+      await loadCustomers();
       setNotice({
         type: "success",
-        text: `${customerName} was removed successfully.`,
+        text: `${customerName} was removed. Their payment history is retained.`,
       });
     } catch (error) {
       setNotice({
@@ -249,6 +471,34 @@ export default function Customers() {
           </div>
 
           <div className="flex flex-col gap-3 sm:flex-row">
+            {selectedIds.length > 0 && !showRemoved ? (
+              <button
+                type="button"
+                onClick={() => setIsBroadcastOpen(true)}
+                className="rounded-2xl bg-cyan-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-cyan-700"
+              >
+                Message {selectedIds.length} selected
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setShowRemoved((current) => !current)}
+              className={`rounded-2xl border px-4 py-3 text-sm font-medium transition ${
+                showRemoved
+                  ? "border-amber-300 bg-amber-50 text-amber-800"
+                  : "border-slate-200 text-slate-700 hover:bg-slate-50"
+              }`}
+            >
+              {showRemoved ? "Back to active" : "Removed customers"}
+            </button>
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={exporting}
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {exporting ? "Exporting..." : "Export CSV"}
+            </button>
             <button
               type="button"
               onClick={loadCustomers}
@@ -268,17 +518,21 @@ export default function Customers() {
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {[
-          ["Total customers", stats.total, "All subscriber records"],
-          ["Active services", stats.active, "Customers currently running"],
-          ["Pending setup", stats.pending, "Accounts awaiting payment or install"],
-          ["Inactive", stats.inactive, "Suspended or closed accounts"],
+          ["Matching customers", String(pagination.total), "Across the current filters"],
+          [
+            "Showing",
+            pagination.total === 0 ? "0" : `${rangeStart}-${rangeEnd}`,
+            "Rows on this page",
+          ],
+          ["Status filter", statusFilter === "all" ? "All" : statusFilter, "Applied server side"],
+          ["Page", `${pagination.page} of ${pagination.totalPages}`, "Use the pager below"],
         ].map(([label, value, helper]) => (
           <div
             key={String(label)}
             className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"
           >
             <div className="text-sm font-medium text-slate-500">{label}</div>
-            <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
+            <div className="mt-3 text-3xl font-semibold capitalize text-slate-950">{value}</div>
             <div className="mt-2 text-sm text-slate-500">{helper}</div>
           </div>
         ))}
@@ -301,8 +555,8 @@ export default function Customers() {
           <div className="grid gap-3 xl:grid-cols-[1fr_220px_180px]">
             <input
               type="text"
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
               placeholder="Search by name, email, phone, box, MAC, or service ID"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
             />
@@ -326,13 +580,13 @@ export default function Customers() {
               <option value="10">10 per page</option>
               <option value="25">25 per page</option>
               <option value="50">50 per page</option>
-              <option value="0">Show all</option>
+              <option value="100">100 per page</option>
             </select>
           </div>
 
           <div className="mt-4 flex flex-col gap-2 text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
             <p>
-              {filteredCustomers.length} result{filteredCustomers.length === 1 ? "" : "s"} found
+              {pagination.total} result{pagination.total === 1 ? "" : "s"} found
             </p>
             <p>
               Search and actions stay consistent with the dashboard and customer profile pages.
@@ -347,9 +601,11 @@ export default function Customers() {
               <p className="mt-4 text-sm text-slate-500">Loading customer records...</p>
             </div>
           </div>
-        ) : filteredCustomers.length === 0 ? (
+        ) : customers.length === 0 ? (
           <div className="px-6 py-16 text-center">
-            <h4 className="text-lg font-semibold text-slate-900">No customers found</h4>
+            <h4 className="text-lg font-semibold text-slate-900">
+              {showRemoved ? "No removed customers" : "No customers found"}
+            </h4>
             <p className="mt-2 text-sm text-slate-500">
               Adjust the filters or create a new customer record.
             </p>
@@ -368,6 +624,17 @@ export default function Customers() {
               <table className="min-w-full">
                 <thead className="bg-slate-50">
                   <tr>
+                    <th className="w-12 px-6 py-4">
+                      {!showRemoved ? (
+                        <input
+                          type="checkbox"
+                          checked={allOnPageSelected}
+                          onChange={toggleSelectPage}
+                          aria-label="Select every customer on this page"
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                      ) : null}
+                    </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
                       Customer
                     </th>
@@ -398,6 +665,17 @@ export default function Customers() {
                       onKeyDown={(event) => handleRowKeyDown(event, customer.id)}
                       className="cursor-pointer transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
                     >
+                      <td className="px-6 py-4" onClick={(event) => event.stopPropagation()}>
+                        {!showRemoved ? (
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.includes(customer.id)}
+                            onChange={() => toggleSelected(customer.id)}
+                            aria-label={`Select ${customer.name}`}
+                            className="h-4 w-4 rounded border-slate-300"
+                          />
+                        ) : null}
+                      </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-3">
                           <div className="flex h-11 w-11 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white">
@@ -421,10 +699,19 @@ export default function Customers() {
                         </div>
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-600">
-                        <div>{safeText(customer.amount, "Not set")}</div>
+                        <div>{formatCurrency(customer.amount, customer.currency)}</div>
                         <div className="mt-1 text-xs text-slate-500">
                           {safeText(customer.paymentMode, "No payment mode")}
                         </div>
+                        {parseFloat(customer.paymentSummary?.outstandingBalance || "0") > 0 ? (
+                          <div className="mt-1 text-xs font-medium text-amber-700">
+                            {formatCurrency(
+                              customer.paymentSummary?.outstandingBalance,
+                              customer.currency
+                            )}{" "}
+                            outstanding
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-600">
                         {formatDate(customer.expiryDate)}
@@ -439,7 +726,21 @@ export default function Customers() {
                         </span>
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <CustomerActions customer={customer} onDelete={handleDelete} />
+                        {showRemoved ? (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleRestore(customer);
+                            }}
+                            disabled={restoringId === customer.id}
+                            className="rounded-xl border border-emerald-200 px-3 py-2 text-sm text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {restoringId === customer.id ? "Restoring..." : "Restore"}
+                          </button>
+                        ) : (
+                          <CustomerActions customer={customer} onDelete={handleDelete} />
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -502,7 +803,7 @@ export default function Customers() {
                         Billing
                       </div>
                       <div className="mt-2 text-sm text-slate-700">
-                        {safeText(customer.amount, "Not set")} •{" "}
+                        {formatCurrency(customer.amount, customer.currency)} •{" "}
                         {safeText(customer.paymentMode, "No payment mode")}
                       </div>
                     </div>
@@ -517,35 +818,49 @@ export default function Customers() {
                   </div>
 
                   <div className="mt-4">
-                    <CustomerActions customer={customer} onDelete={handleDelete} />
+                    {showRemoved ? (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleRestore(customer);
+                        }}
+                        disabled={restoringId === customer.id}
+                        className="rounded-xl border border-emerald-200 px-3 py-2 text-sm text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {restoringId === customer.id ? "Restoring..." : "Restore"}
+                      </button>
+                    ) : (
+                      <CustomerActions customer={customer} onDelete={handleDelete} />
+                    )}
                   </div>
                 </div>
               ))}
             </div>
 
-            {itemsPerPage !== 0 && totalPages > 1 ? (
+            {pagination.totalPages > 1 ? (
               <div className="flex flex-col gap-4 border-t border-slate-200 px-6 py-4 text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
                 <p>
-                  Showing {startIndex + 1} to{" "}
-                  {Math.min(startIndex + itemsPerPage, filteredCustomers.length)} of{" "}
-                  {filteredCustomers.length} customers
+                  Showing {rangeStart} to {rangeEnd} of {pagination.total} customers
                 </p>
                 <div className="flex gap-2">
                   <button
                     type="button"
                     onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                    disabled={currentPage === 1}
+                    disabled={pagination.page <= 1 || loading}
                     className="rounded-xl border border-slate-200 px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Previous
                   </button>
                   <div className="rounded-xl border border-slate-200 px-4 py-2 text-slate-700">
-                    Page {currentPage} of {totalPages}
+                    Page {pagination.page} of {pagination.totalPages}
                   </div>
                   <button
                     type="button"
-                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-                    disabled={currentPage === totalPages}
+                    onClick={() =>
+                      setCurrentPage((page) => Math.min(pagination.totalPages, page + 1))
+                    }
+                    disabled={pagination.page >= pagination.totalPages || loading}
                     className="rounded-xl border border-slate-200 px-3 py-2 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Next
@@ -556,6 +871,14 @@ export default function Customers() {
           </>
         )}
       </section>
+
+      {isBroadcastOpen ? (
+        <BroadcastDialog
+          customerIds={selectedIds}
+          onClose={() => setIsBroadcastOpen(false)}
+          onDone={handleBroadcastDone}
+        />
+      ) : null}
     </div>
   );
 }

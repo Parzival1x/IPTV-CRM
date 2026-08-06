@@ -41,13 +41,20 @@ This project is no longer a static dashboard template. It now behaves as a real 
 - payment recording with support for credit and due balances
 - service requests from customers to admins
 - portal password reset management
-- WhatsApp and email notifications from the backend
+- WhatsApp and email notifications from the backend, honouring per-customer
+  opt-out, with delivery receipts recorded from Meta's callbacks
+- a scheduler that expires lapsed subscriptions and sends renewal reminders
+- transactional payment recording with part payments, split payments, account
+  credit and refunds
+- an audit trail of every administrative action
+- CSV export and revenue reporting
 - Supabase-backed data persistence
 
 The repository is split into:
-- a frontend application under [src](E:\projects\admin_dashboard\src)
-- a backend API under [backend](E:\projects\admin_dashboard\backend)
-- a SQL schema under [backend/supabase/schema.sql](E:\projects\admin_dashboard\backend\supabase\schema.sql)
+- a frontend application under [src](src)
+- a backend API under [backend](backend)
+- a SQL schema under [backend/supabase/](backend/supabase/), applied from a
+  single file
 
 ## Main Features
 
@@ -93,30 +100,36 @@ The repository is split into:
 ## Project Structure
 
 ```text
-admin_dashboard/
+IPTV-CRM/
   backend/
     config/
-      runtime.js
-      supabase.js
+      logger.js            structured logging, with credential redaction
+      runtime.js           env parsing, CORS origins, scheduler config
+      supabase.js          memoised service-role client
     middleware/
-      auth.js
+      auth.js              JWT verification, token revocation, role checks
+      rateLimit.js         tighter limits on the login routes
+      validation.js        shared validators and error mapping
     repositories/
       adminRepository.js
+      auditRepository.js   who did what
       customerRepository.js
       serviceRequestRepository.js
       adminNotificationRepository.js
     routes/
-      admin.js
+      admin.js             profile, admin management, scheduler control
       adminNotifications.js
       auth.js
       customerAuth.js
-      customers.js
-      notifications.js
-      plans.js
+      customers.js         directory, services, payments, refunds
+      notifications.js     single send and broadcast
+      plans.js             catalogue CRUD
       portal.js
+      reports.js           CSV export, revenue, dashboard summary
       serviceRequests.js
+      webhooks.js          WhatsApp delivery receipts
     scripts/
-      apply-schema.js
+      apply-schema.js      applies supabase/install.sql via DATABASE_URL
       configure-notifications.js
       seed-admin.js
       seed-demo-customers.js
@@ -124,22 +137,30 @@ admin_dashboard/
       test-notifications.js
     services/
       notificationService.js
+      schedulerService.js  expiry sweep and renewal reminders
     supabase/
-      schema.sql
+      README.md
+      install.sql          the whole schema, one file
+      verify.mjs           applies it to a throwaway Postgres and tests it
     utils/
+      customerMapping.js   pure value mapping and date arithmetic
       ids.js
     server.js
     package.json
   src/
     components/
-    context/
+      common/              modals, cards, messaging
     data/
+      customersDB.ts       typed data layer over the API
     pages/
     services/
+      api.ts               HTTP client
+    utils/
+      currency.ts
     App.tsx
     main.tsx
   .env.example
-  start.bat
+  start.bat                launches both services and opens the browser
   restart-backend.bat
   setup-notifications.bat
   README.md
@@ -167,8 +188,8 @@ If you only want the short version, this is the minimum path:
 2. Install frontend and backend dependencies
 3. Copy `.env.example` to `.env`
 4. Fill in Supabase keys and database connection values
-5. Run [backend/supabase/schema.sql](E:\projects\admin_dashboard\backend\supabase\schema.sql) in Supabase SQL Editor
-6. Start the project with [start.bat](E:\projects\admin_dashboard\start.bat)
+5. Run [backend/supabase/install.sql](backend/supabase/install.sql) in the Supabase SQL Editor
+6. Start the project with [start.bat](start.bat)
 7. Seed the first admin if needed with `cd backend && npm.cmd run seed:admin`
 8. Optionally seed demo customers with `cd backend && npm.cmd run seed:demo-customers`
 
@@ -186,7 +207,7 @@ cd admin_dashboard
 If you already have the repository locally:
 
 ```powershell
-cd /d E:\projects\admin_dashboard
+cd <your-clone>
 ```
 
 ### Step 2: Install Frontend Dependencies
@@ -217,9 +238,9 @@ This creates a local `.env` file that the frontend and backend will use during d
 
 ### Step 5: Fill In The `.env` File
 
-Open [`.env`](E:\projects\admin_dashboard\.env) and replace the placeholders with your real values.
+Open [`.env`](.env) and replace the placeholders with your real values.
 
-Use [`.env.example`](E:\projects\admin_dashboard\.env.example) only as a template. Do not keep secrets there.
+Use [`.env.example`](.env.example) only as a template. Do not keep secrets there.
 
 ### Step 6: Create And Configure Your Supabase Project
 
@@ -238,18 +259,21 @@ You will need:
 
 ### Step 7: Apply The SQL Schema
 
-Open the SQL editor in Supabase and run:
-
-- [backend/supabase/schema.sql](E:\projects\admin_dashboard\backend\supabase\schema.sql)
-
-How:
-1. Open Supabase dashboard
+1. Open the Supabase dashboard
 2. Open `SQL Editor`
 3. Create a new query
-4. Paste the full contents of `schema.sql`
-5. Run the query
+4. Paste the full contents of
+   [backend/supabase/install.sql](backend/supabase/install.sql)
+5. Run it
 
-Do not skip this step. The backend expects these tables and columns to exist.
+That is the whole database setup — one file. It creates every type, table,
+index, trigger, function, view and row level security rule, seeds a starter
+plan catalogue, prints a summary when it finishes, and raises an exception
+rather than completing quietly if any part of it failed.
+
+Safe to run more than once.
+
+Do not skip this step. The backend refuses to report healthy without it.
 
 ### Step 8: Start The Application
 
@@ -304,7 +328,6 @@ The project uses a shared root `.env` file. The frontend reads `VITE_*` variable
 ```env
 VITE_API_BASE_URL=http://localhost:3001/api
 VITE_SUPABASE_URL=https://your-project-ref.supabase.co
-VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
@@ -346,12 +369,12 @@ WHATSAPP_ACCESS_TOKEN=your_whatsapp_access_token
 FACEBOOK_APP_ID=your_facebook_app_id
 FACEBOOK_APP_SECRET=your_facebook_app_secret
 
-EMAIL_FROM=Abhishek Jangra <i.abhishekjangra@gmail.com>
+EMAIL_FROM=StreamOps IPTV <no-reply@yourcompany.com>
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=465
 SMTP_SECURE=true
-SMTP_USER=i.abhishekjangra@gmail.com
-SMTP_PASS=your_gmail_app_password
+SMTP_USER=your_smtp_username
+SMTP_PASS=your_smtp_password
 ```
 
 ### What Each Important Variable Does
@@ -360,10 +383,8 @@ SMTP_PASS=your_gmail_app_password
   Frontend base URL for the Express API.
 
 - `VITE_SUPABASE_URL`
-  Supabase project URL exposed to the frontend.
-
-- `VITE_SUPABASE_ANON_KEY`
-  Frontend-safe Supabase key.
+  Read by the backend only, as a fallback for `SUPABASE_URL`. The frontend no
+  longer talks to Supabase directly, so no anon key is needed anywhere.
 
 - `SUPABASE_URL`
   Backend copy of the same Supabase project URL.
@@ -409,30 +430,68 @@ For `DATABASE_URL`:
 
 If direct DB access is unreliable from your machine or deployment target, prefer the Supabase pooler connection string.
 
-### Required Schema Tables
+### What the schema contains
 
-The app expects the Supabase schema to create tables such as:
+`install.sql` is organised into fifteen numbered sections in dependency order,
+with each table commented where the reasoning is not obvious.
 
-- `admin_users`
-- `customers`
-- `subscription_plans`
-- `customer_subscriptions`
-- `payments`
-- `invoices`
-- `service_requests`
-- `admin_notifications`
-- `whatsapp_templates`
-- `whatsapp_messages`
-- `email_messages`
-- `activity_logs`
+| Area | Tables |
+| --- | --- |
+| Identity | `admin_users`, `customers` |
+| Catalogue | `subscription_plans` |
+| Subscriptions | `customer_subscriptions` |
+| Money | `payments`, `payment_allocations` |
+| Requests | `service_requests`, `admin_notifications` |
+| Messaging | `email_messages`, `whatsapp_messages`, `subscription_reminders` |
+| Audit | `activity_logs` |
+
+Functions: `record_customer_payment`, `refund_customer_payment`,
+`expire_lapsed_subscriptions`.
+
+Views: `customer_financials`, `renewal_overview`, `revenue_by_month`.
+
+Full detail, including what is deliberately left out and why, is in
+[backend/supabase/README.md](backend/supabase/README.md).
+
+### Applying it
+
+There is one schema file, [`install.sql`](backend/supabase/install.sql), and it
+builds the database from scratch. There is no migration folder: this project
+does not maintain a second, incremental path.
+
+Two ways to apply it:
+
+- **Supabase SQL Editor** — paste and run. This is the normal route.
+- **From the command line**, if `DATABASE_URL` is set:
+
+  ```powershell
+  cd backend
+  npm.cmd run db:push
+  ```
+
+Verify before touching a real database. This applies the file to a throwaway
+in-process Postgres — no Supabase project, no Docker — and runs 49 checks over
+the payment paths, the reporting views and every layer of the security posture:
+
+```powershell
+cd backend
+npm.cmd test
+```
 
 ### If Schema Changes Later
 
-When this project’s SQL changes in the future:
+When this project's SQL changes in the future:
 
-1. open [backend/supabase/schema.sql](E:\projects\admin_dashboard\backend\supabase\schema.sql)
-2. re-run the updated SQL in Supabase SQL Editor
-3. restart the backend
+1. re-run [backend/supabase/install.sql](backend/supabase/install.sql) in the
+   Supabase SQL Editor
+2. restart the backend
+3. confirm <http://localhost:3001/api/health> reports `"schema": "current"`
+
+Re-running picks up new functions, views, indexes, tables and security rules.
+It does **not** add a column to a table that already exists — `create table if
+not exists` skips the table whole. A change of that shape needs one
+`alter table ... add column if not exists` run by hand first. See
+[backend/supabase/README.md](backend/supabase/README.md).
 
 ## Running The App
 
@@ -457,14 +516,14 @@ This script:
 Backend:
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd start
 ```
 
 Frontend in a second terminal:
 
 ```powershell
-cd /d E:\projects\admin_dashboard
+cd <your-clone>
 npm.cmd run dev
 ```
 
@@ -479,14 +538,14 @@ restart-backend.bat
 ### Build Frontend
 
 ```powershell
-cd /d E:\projects\admin_dashboard
+cd <your-clone>
 npm.cmd run build
 ```
 
 ### Backend Syntax Smoke Test
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd test
 ```
 
@@ -500,10 +559,14 @@ Default credentials:
 - Email: `admin@example.com`
 - Password: `admin123`
 
+This account is only ever created when `NODE_ENV` is not `production`. The
+password predates the strength rule the API now enforces, so it works for
+signing in but cannot be set as a *new* password.
+
 ### Explicit Admin Creation
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd run seed:admin
 ```
 
@@ -516,7 +579,7 @@ This uses:
 ### Demo Customer Seeding
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd run seed:demo-customers
 ```
 
@@ -529,7 +592,7 @@ This creates richer customer records for testing:
 
 Known seeded customer portal account:
 - Email: `user@example.com`
-- Password: `user123`
+- Password: `demo-portal-2026`
 
 ## Login Routes And Accounts
 
@@ -585,12 +648,12 @@ Important:
 For Gmail SMTP:
 
 ```env
-EMAIL_FROM=Abhishek Jangra <i.abhishekjangra@gmail.com>
+EMAIL_FROM=StreamOps IPTV <no-reply@yourcompany.com>
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=465
 SMTP_SECURE=true
-SMTP_USER=i.abhishekjangra@gmail.com
-SMTP_PASS=your_gmail_app_password
+SMTP_USER=your_smtp_username
+SMTP_PASS=your_smtp_password
 ```
 
 Important:
@@ -606,21 +669,21 @@ setup-notifications.bat
 ### Test Email
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd run email:test
 ```
 
 To send to a real recipient:
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd run email:test -- --to=you@example.com
 ```
 
 ### Test Notifications
 
 ```powershell
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd run notifications:test -- --list-customers
 npm.cmd run notifications:test -- --customer-id=YOUR_CUSTOMER_UUID --channel=email --template=welcome
 npm.cmd run notifications:test -- --customer-id=YOUR_CUSTOMER_UUID --channel=whatsapp --template=custom --message="Your IPTV service is active."
@@ -632,7 +695,7 @@ Restart the backend after changing notification-related `.env` values.
 
 ### Frontend Scripts
 
-From [package.json](E:\projects\admin_dashboard\package.json):
+From [package.json](package.json):
 
 - `npm.cmd run dev`
   Starts the Vite development server.
@@ -645,7 +708,7 @@ From [package.json](E:\projects\admin_dashboard\package.json):
 
 ### Backend Scripts
 
-From [backend/package.json](E:\projects\admin_dashboard\backend\package.json):
+From [backend/package.json](backend/package.json):
 
 - `npm.cmd start`
   Starts the backend in normal mode.
@@ -673,20 +736,20 @@ From [backend/package.json](E:\projects\admin_dashboard\backend\package.json):
 
 ### Windows Helper Scripts
 
-- [start.bat](E:\projects\admin_dashboard\start.bat)
+- [start.bat](start.bat)
   Starts frontend and backend together.
 
-- [restart-backend.bat](E:\projects\admin_dashboard\restart-backend.bat)
+- [restart-backend.bat](restart-backend.bat)
   Restarts the backend dev server when port `3001` is already in use.
 
-- [setup-notifications.bat](E:\projects\admin_dashboard\setup-notifications.bat)
+- [setup-notifications.bat](setup-notifications.bat)
   Runs the backend notification setup helper.
 
 ## How The App Is Organized
 
 ### Frontend
 
-The frontend is routed from [App.tsx](E:\projects\admin_dashboard\src\App.tsx).
+The frontend is routed from [App.tsx](src/App.tsx).
 
 Main route groups:
 - public homepage
@@ -696,26 +759,26 @@ Main route groups:
 - customer portal shell
 
 Important page files include:
-- [src/pages/HomePage.tsx](E:\projects\admin_dashboard\src\pages\HomePage.tsx)
-- [src/pages/AuthPages/SignIn.tsx](E:\projects\admin_dashboard\src\pages\AuthPages\SignIn.tsx)
-- [src/pages/Dashboard.tsx](E:\projects\admin_dashboard\src\pages\Dashboard.tsx)
-- [src/pages/Tables.tsx](E:\projects\admin_dashboard\src\pages\Tables.tsx)
-- [src/pages/CustomerDetail.tsx](E:\projects\admin_dashboard\src\pages\CustomerDetail.tsx)
-- [src/pages/Forms.tsx](E:\projects\admin_dashboard\src\pages\Forms.tsx)
-- [src/pages/EditCustomer.tsx](E:\projects\admin_dashboard\src\pages\EditCustomer.tsx)
-- [src/pages/CustomerPortalDashboard.tsx](E:\projects\admin_dashboard\src\pages\CustomerPortalDashboard.tsx)
+- [src/pages/HomePage.tsx](src/pages/HomePage.tsx)
+- [src/pages/AuthPages/SignIn.tsx](src/pages/AuthPages/SignIn.tsx)
+- [src/pages/Dashboard.tsx](src/pages/Dashboard.tsx)
+- [src/pages/Tables.tsx](src/pages/Tables.tsx)
+- [src/pages/CustomerDetail.tsx](src/pages/CustomerDetail.tsx)
+- [src/pages/Forms.tsx](src/pages/Forms.tsx)
+- [src/pages/EditCustomer.tsx](src/pages/EditCustomer.tsx)
+- [src/pages/CustomerPortalDashboard.tsx](src/pages/CustomerPortalDashboard.tsx)
 
 ### Backend
 
-The backend entry point is [backend/server.js](E:\projects\admin_dashboard\backend\server.js).
+The backend entry point is [backend/server.js](backend/server.js).
 
 Key backend pieces:
-- [backend/routes/auth.js](E:\projects\admin_dashboard\backend\routes\auth.js)
-- [backend/routes/customerAuth.js](E:\projects\admin_dashboard\backend\routes\customerAuth.js)
-- [backend/routes/customers.js](E:\projects\admin_dashboard\backend\routes\customers.js)
-- [backend/routes/portal.js](E:\projects\admin_dashboard\backend\routes\portal.js)
-- [backend/routes/serviceRequests.js](E:\projects\admin_dashboard\backend\routes\serviceRequests.js)
-- [backend/routes/notifications.js](E:\projects\admin_dashboard\backend\routes\notifications.js)
+- [backend/routes/auth.js](backend/routes/auth.js)
+- [backend/routes/customerAuth.js](backend/routes/customerAuth.js)
+- [backend/routes/customers.js](backend/routes/customers.js)
+- [backend/routes/portal.js](backend/routes/portal.js)
+- [backend/routes/serviceRequests.js](backend/routes/serviceRequests.js)
+- [backend/routes/notifications.js](backend/routes/notifications.js)
 
 ### Database
 
@@ -744,10 +807,10 @@ This is a good day-to-day workflow for development:
 9. Before finishing, run:
 
 ```powershell
-cd /d E:\projects\admin_dashboard
+cd <your-clone>
 npm.cmd run build
 
-cd /d E:\projects\admin_dashboard\backend
+cd backend
 npm.cmd test
 ```
 
@@ -765,8 +828,17 @@ Before production deployment:
 8. Use a valid WhatsApp token
 9. Confirm `FRONTEND_URL` matches the deployed frontend URL exactly
 10. Rotate any secrets that may have been exposed during development
-11. Confirm the latest SQL schema is applied in Supabase
-12. Test admin login, customer portal login, and one notification send before launch
+11. Apply the schema by running `backend/supabase/install.sql`
+12. Set `TRUST_PROXY_HOPS` to the number of proxies in front of the API, or the
+    rate limiters treat every client as one
+13. Set `SCHEDULER_ENABLED=true` so subscriptions expire and renewal reminders
+    go out, and set `RENEWAL_REMINDER_DAYS` / `RENEWAL_REMINDER_CHANNELS`
+14. Set `WHATSAPP_VERIFY_TOKEN` and `FACEBOOK_APP_SECRET`, then subscribe the
+    webhook at `POST /api/webhooks/whatsapp` so delivery receipts are recorded
+15. Check `GET /api/health` reports `"schema": "current"` — it returns 503 with
+    `"outdated"` if the migrations have not been applied
+16. Test admin login, customer portal login, one payment, and one notification
+    send before launch
 
 ## Troubleshooting
 
@@ -846,14 +918,28 @@ If using Gmail:
 
 ### Schema Or Column Errors
 
-If you see missing table or missing column errors:
+Check <http://localhost:3001/api/health> first — it reports
+`"schema": "outdated"` and returns 503 when the schema has not been applied.
 
-1. open [backend/supabase/schema.sql](E:\projects\admin_dashboard\backend\supabase\schema.sql)
-2. rerun the SQL in Supabase SQL Editor
-3. restart the backend
+1. re-run [backend/supabase/install.sql](backend/supabase/install.sql) in the
+   Supabase SQL Editor
+2. restart the backend
+
+If the error names a **column** rather than a table, re-running is not enough:
+`create table if not exists` skips a table that already exists, so the new
+column is never added. Add it once by hand, then re-run:
+
+```sql
+alter table public.<table> add column if not exists <column> <type>;
+```
 
 ## Security Notes
 
+- The database is deny-all by default: row level security is enabled on every
+  table with no policies, and table, view, sequence and function grants are
+  revoked from `anon` and `authenticated`. Default privileges are altered so
+  objects added later start locked too. `install.sql` re-checks all of that
+  before it finishes and raises if any layer is incomplete.
 - Never commit real secrets into `.env.example`
 - Never expose `SUPABASE_SERVICE_ROLE_KEY` to the frontend
 - Use a strong `JWT_SECRET`
@@ -868,6 +954,19 @@ That means:
 - admin login does not currently use Supabase Auth
 - customer portal login does not currently use Supabase Auth
 - Supabase is currently the database layer, not the primary auth provider
+
+Tokens carry a `tokenVersion` that is checked against the row on every request.
+Changing a password, revoking portal access, or deactivating an administrator
+increments it, which invalidates every token already issued to that principal
+rather than leaving it usable until it expires.
+
+Roles are enforced, not decorative:
+
+| Role | Can |
+| --- | --- |
+| `moderator` | Read everything; create and edit customers, services and payments |
+| `admin` | The above, plus delete/restore customers, refund payments, reset portal passwords, manage plans, broadcast, run the scheduler |
+| `super-admin` | The above, plus create and deactivate administrators |
 
 ## Notes
 

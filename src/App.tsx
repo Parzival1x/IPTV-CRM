@@ -20,6 +20,7 @@ import EditCustomer from "./pages/EditCustomer";
 import AddCustomer from "./pages/Forms";
 import HomePage from "./pages/HomePage";
 import PaymentStatusReview from "./pages/PaymentStatusReview";
+import PlansAdmin from "./pages/PlansAdmin";
 import PortalAccessAdmin from "./pages/PortalAccessAdmin";
 import PortalSignIn from "./pages/PortalSignIn";
 import Profile from "./pages/Profile";
@@ -58,6 +59,12 @@ const navigationItems: NavigationItem[] = [
     to: "/service-requests",
     description: "Approve customer service requests and track admin alerts.",
     shortLabel: "RQ",
+  },
+  {
+    label: "Plans",
+    to: "/plans",
+    description: "Price, publish, and retire the subscription catalogue.",
+    shortLabel: "PL",
   },
   {
     label: "Portal Access",
@@ -128,6 +135,10 @@ const getPageTitle = (pathname: string) => {
 
   if (pathname === "/portal-access") {
     return "Portal Access";
+  }
+
+  if (pathname === "/plans") {
+    return "Subscription Plans";
   }
 
   if (pathname.startsWith("/customers/") && pathname.endsWith("/edit")) {
@@ -452,6 +463,7 @@ export default function App() {
           <Route path="/renewals" element={<PaymentStatusReview />} />
           <Route path="/service-requests" element={<ServiceRequestsReview />} />
           <Route path="/portal-access" element={<PortalAccessAdmin />} />
+          <Route path="/plans" element={<PlansAdmin />} />
           <Route path="/customers/:id" element={<CustomerDetail />} />
           <Route path="/customers/:id/edit" element={<EditCustomer />} />
           <Route path="/profile" element={<Profile />} />

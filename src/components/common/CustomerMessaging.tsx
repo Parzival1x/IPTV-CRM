@@ -37,7 +37,7 @@ const templateDescriptions: Record<NotificationTemplate, string> = {
   custom: 'Write your own custom message for this customer.'
 };
 
-const TwilioWhatsAppMessaging = ({
+const CustomerMessaging = ({
   isOpen,
   onClose,
   customer,
@@ -339,4 +339,4 @@ const TwilioWhatsAppMessaging = ({
   );
 };
 
-export default TwilioWhatsAppMessaging;
+export default CustomerMessaging;
